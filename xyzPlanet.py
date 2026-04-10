@@ -1,5 +1,4 @@
 import numpy as np
-import pyvista as pv
 
 
 class Planet:
@@ -11,6 +10,7 @@ class Planet:
         self.radius = radius
         self.x_history = []
         self.y_history = []
+        self.position_history = []
         self.color = color
 
         self.visualBody = None
@@ -20,22 +20,37 @@ class Planet:
     def get_body_visuals(self):
         return self.visualBody
 
+    def assign_body_visuals(self, visual_body):
+        self.visualBody = visual_body
+
     def get_trail_visuals(self):
         return self.visualTrail
+
+    def assign_trail_visuals(self, visual_trail):
+        self.visualTrail = visual_trail
 
     def get_label(self):
         return self.label
 
-    def set_trail_visuals(self):
-        self.visualTrail.set_data(self.x_history, self.y_history)
+    def assign_label(self, label):
+        self.label = label
 
-    def set_body_visuals(self):
-        self.visualBody.set_center(
-            (self.positionVector[0], self.positionVector[1])
-        )
+    def set_trail_visuals(self):
+        if self.visualTrail is not None and self.position_history:
+            self.visualTrail.points = np.array(self.position_history, dtype=float)
+
+    def set_body_visuals(self, position=None):
+        if self.visualBody is None:
+            return
+
+        target_position = self.positionVector if position is None else np.array(position, dtype=float)
+        padded_position = np.zeros(3, dtype=float)
+        padded_position[:min(3, len(target_position))] = target_position[:3]
+        self.visualBody.SetPosition(*padded_position)
 
     def set_label(self):
-        self.label.set_position((self.positionVector[0], self.positionVector[1]))
+        if self.label is not None:
+            self.label.set_position((self.positionVector[0], self.positionVector[1]))
 
     def get_mass(self):
         return self.mass
@@ -74,8 +89,18 @@ class Planet:
 
     def append_x_history(self):
         self.x_history.append(self.positionVector[0])
+
     def append_y_history(self):
         self.y_history.append(self.positionVector[1])
+
+    def append_position_history(self, position=None):
+        target_position = self.positionVector if position is None else np.array(position, dtype=float)
+        padded_position = np.zeros(3, dtype=float)
+        padded_position[:min(3, len(target_position))] = target_position[:3]
+        self.position_history.append(padded_position)
+
+    def get_position_history(self):
+        return self.position_history
 
     def get_color(self):
         return self.color
