@@ -3,6 +3,8 @@ import xyzSystem
 
 
 def create_planets():
+    # Build the initial body list from the ephemeris pulled from https://ssd.jpl.nasa.gov/horizons/.
+    # Positions and velocities are stored in meters and meters/second.
     return [
         xyzPlanet.Planet(
             'Neptune',
@@ -87,12 +89,17 @@ def create_planets():
 
 
 def main():
+    # `System` owns the simulation loop, PyVista scene, camera, and input.
     solar_system = xyzSystem.System(
         create_planets(),
         dt=75000.0,
+
+        # Comment these three lines out if you don't want the system anchored to a center mass, ex: if you wanted to build a binary star system.
         central_mass=1.989e30,
         central_radius=6.957e8,
         central_color='yellow',
+        #
+
         render_scale=1e10,
     )
     solar_system.setup_scene()
@@ -100,4 +107,5 @@ def main():
 
 
 if __name__ == '__main__':
+    # Run the app when this file is executed directly.
     main()

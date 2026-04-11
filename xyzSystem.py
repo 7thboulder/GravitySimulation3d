@@ -3,6 +3,7 @@ import pyvista as pv
 
 
 class System:
+    # Main controller for the simulation: physics stepping, rendering, camera, and UI.
     def __init__(
         self,
         interacting_bodies: list,
@@ -15,16 +16,20 @@ class System:
         camera_speed=2e10,
         rotation_speed=1.5,
     ):
+        # Bodies whose positions are advanced each frame.
         self.listOfInteractingBodies = interacting_bodies
 
+        # Physics constants and integration timestep.
         self.G = 6.6743e-11
         self.dt = dt
 
+        # Optional fixed central mass lets planets orbit a sun without storing the sun as a body.
         self.requiresCentral = central_mass != 0.0
         self.centralMass = central_mass
         self.central_radius = central_radius
         self.central_color = central_color
 
+        # Renderer state and real-space camera state.
         self.plotter = None
         self.timer_interval = timer_interval
         self.render_scale = render_scale
@@ -36,6 +41,7 @@ class System:
         self.camera_speed = camera_speed
         self.rotation_speed = rotation_speed
 
+        # Handles to scene objects that need to be updated over time.
         self.central_actor = None
         self.body_actors = {}
         self.label_points = None
@@ -50,6 +56,7 @@ class System:
         self.au_in_meters = 149_597_870_700.0
 
     def _as_3d_vector(self, vector):
+        # Normalize any 2D/3D input into a 3D vector for rendering math.
         vector_array = np.array(vector, dtype=float)
         padded_vector = np.zeros(3, dtype=float)
         padded_vector[:min(3, len(vector_array))] = vector_array[:3]
@@ -59,6 +66,7 @@ class System:
         return self._as_3d_vector(body.get_position())
 
     def _camera_basis(self):
+        # Convert yaw/pitch into an orthonormal forward/right/up basis.
         cos_pitch = np.cos(self.pitch)
         forward = np.array(
             [
@@ -82,9 +90,11 @@ class System:
         return forward, right, up
 
     def _render_position(self, real_position):
+        # Floating-origin rendering keeps large astronomical coordinates near the camera.
         return (self._as_3d_vector(real_position) - self.camera_position) / self.render_scale
 
     def _camera_key_map(self):
+        # Arrow keys rotate the camera rather than translating it.
         return {
             'Left': ('yaw', 1.0),
             'Right': ('yaw', -1.0),
@@ -93,6 +103,7 @@ class System:
         }
 
     def _movement_key_map(self):
+        # Movement keys translate the camera through the scene.
         return {
             'w': ('forward', 1.0),
             's': ('forward', -1.0),
@@ -103,6 +114,7 @@ class System:
         }
 
     def _set_camera_view(self):
+        # The actual VTK camera stays near the origin; the world is shifted around it.
         forward, _, up = self._camera_basis()
         self.plotter.camera.position = (0.0, 0.0, 0.0)
         self.plotter.camera.focal_point = tuple(forward * 10.0)
@@ -114,6 +126,7 @@ class System:
         self._set_camera_view()
 
     def _on_key_press(self, obj, _event):
+        # Track held keys so movement stays smooth between timer ticks.
         self.pressed_keys.add(obj.GetKeySym())
 
     def _on_key_release(self, obj, _event):
@@ -123,6 +136,7 @@ class System:
         if self.plotter is None:
             raise RuntimeError('Call setup_scene before binding inputs.')
 
+        # Raw VTK observers capture held keys, while PyVista key events handle one-shot toggles.
         interactor = self.plotter.iren.interactor
         interactor.AddObserver('KeyPressEvent', self._on_key_press)
         interactor.AddObserver('KeyReleaseEvent', self._on_key_release)
@@ -132,11 +146,13 @@ class System:
         self.plotter.add_key_event('bracketleft', self.decrease_camera_speed)
 
     def _create_body_visual(self, body):
+        # Each planet gets a sphere actor and a polyline mesh for its trail.
         body_mesh = pv.Sphere(radius=max(body.get_radius() / self.render_scale, 0.02))
         actor = self.plotter.add_mesh(body_mesh, color=body.get_color(), name=body.get_name())
         body.assign_body_visuals(actor)
         self.body_actors[body.get_name()] = actor
 
+        # Start each trail with one point so PyVista has valid geometry immediately.
         initial_point = np.array([self._render_position(body.get_position())], dtype=float)
         trail_mesh = pv.PolyData(initial_point)
         self.plotter.add_mesh(
@@ -153,10 +169,12 @@ class System:
         if not self.requiresCentral:
             return
 
+        # Render the central body separately from the list of orbiting bodies.
         central_mesh = pv.Sphere(radius=max(self.central_radius / self.render_scale, 0.03))
         self.central_actor = self.plotter.add_mesh(central_mesh, color=self.central_color, name='central-body')
 
     def _setup_labels(self):
+        # Labels are stored in one shared point cloud so they can all be updated together.
         label_positions = []
         self.label_names = []
 
@@ -183,6 +201,7 @@ class System:
         )
 
     def setup_scene(self, plotter=None):
+        # Build the PyVista scene once, then reuse the stored actors each frame.
         self.plotter = plotter if plotter is not None else pv.Plotter()
         self.plotter.set_background('black')
         self.plotter.add_axes()
@@ -208,6 +227,7 @@ class System:
         return self.plotter
 
     def get_single_body_acceleration(self, pos1, mass_val):
+        # Newtonian point-mass gravity toward `mass_val` from the displacement vector `pos1`.
         dist = np.linalg.norm(pos1)
         if dist == 0.0:
             return np.zeros_like(pos1, dtype=float)
@@ -215,11 +235,13 @@ class System:
         return ag
 
     def update_all(self, _frame=None):
+        # Advance all bodies by one simulation timestep.
         for body in self.listOfInteractingBodies:
             total_acc = np.zeros_like(body.get_position(), dtype=float)
             if self.requiresCentral:
                 total_acc += self.get_single_body_acceleration(body.get_position(), self.centralMass)
 
+            # Sum the contribution from every other body in the system.
             for body_to_compare in self.listOfInteractingBodies:
                 if body is body_to_compare:
                     continue
@@ -234,6 +256,7 @@ class System:
             body.append_y_history()
 
     def update_camera(self, dt):
+        # Apply rotation first so movement uses the latest look direction.
         for key_sym, (axis_name, direction) in self._camera_key_map().items():
             if key_sym not in self.pressed_keys:
                 continue
@@ -242,6 +265,7 @@ class System:
             elif axis_name == 'pitch':
                 self.pitch += direction * self.rotation_speed * dt
 
+        # Clamp pitch so the camera cannot flip over at the poles.
         self.pitch = float(np.clip(self.pitch, -np.pi / 2.0 + 0.05, np.pi / 2.0 - 0.05))
 
         forward, right, up = self._camera_basis()
@@ -258,6 +282,7 @@ class System:
         self._set_camera_view()
 
     def _force_surface_rendering(self):
+        # PyVista binds `W` to wireframe by default; this keeps body meshes solid.
         actors = list(self.body_actors.values())
         if self.central_actor is not None:
             actors.append(self.central_actor)
@@ -270,6 +295,7 @@ class System:
             self.status_text.SetText(3, 'Paused' if self.is_paused else 'Running')
 
     def _format_camera_speed(self):
+        # Show camera speed in the most readable unit for the current scale.
         if self.camera_speed >= self.au_in_meters:
             return f'{self.camera_speed / self.au_in_meters:.2f} AU/s'
         speed_ratio = self.camera_speed / self.speed_of_light
@@ -282,6 +308,7 @@ class System:
             self.speed_text.SetText(0, f'Camera speed: {self._format_camera_speed()}')
 
     def increase_camera_speed(self):
+        # Speed controls are multiplicative so they stay useful across huge scales.
         self.camera_speed *= self.camera_speed_step
         self._update_speed_text()
         if self.plotter is not None:
@@ -294,6 +321,7 @@ class System:
             self.plotter.render()
 
     def toggle_pause(self):
+        # Pausing freezes physics but still lets the user move the camera.
         self.is_paused = not self.is_paused
         self._update_status_text()
         self._force_surface_rendering()
@@ -301,6 +329,7 @@ class System:
             self.plotter.render()
 
     def sync_visuals(self):
+        # Push the current simulation state into every render object.
         label_positions = []
 
         if self.central_actor is not None:
@@ -322,6 +351,7 @@ class System:
             self.label_points.points = np.array(label_positions, dtype=float)
 
     def update_frame(self, _caller=None, _event=None):
+        # Timer callback: step physics, move camera, sync meshes, then render.
         frame_dt = self.timer_interval / 1000.0
         if not self.is_paused:
             self.update_all()
@@ -333,11 +363,13 @@ class System:
         self.plotter.render()
 
     def _update_trail(self, body):
+        # Rebuild the visible polyline from the stored world-space trail history.
         trail_mesh = body.get_trail_visuals()
         history = body.get_position_history()
         if trail_mesh is None:
             return
 
+        # One point is valid geometry, but it is not yet a visible line.
         if len(history) < 2:
             trail_mesh.points = (
                 np.array([self._render_position(point) for point in history], dtype=float)
@@ -357,6 +389,7 @@ class System:
         trail_mesh.lines = line_cells
 
     def run(self):
+        # Start the render window and attach the repeating timer loop.
         if self.plotter is None:
             self.setup_scene()
 

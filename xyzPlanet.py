@@ -2,6 +2,7 @@ import numpy as np
 
 
 class Planet:
+    # Lightweight data object for one simulated body and its render handles.
     def __init__(
             self,
             name,
@@ -10,16 +11,20 @@ class Planet:
             mass,
             radius,
             color):
+        # Physical state used by the gravity solver.
         self.name = name
         self.velocityVector = np.array(velocity_vector, dtype=float)
         self.positionVector = np.array(position_vector, dtype=float)
         self.mass = mass
         self.radius = radius
+
+        # History buffers used for 2D compatibility and 3D trail rendering.
         self.x_history = []
         self.y_history = []
         self.position_history = []
         self.color = color
 
+        # PyVista objects are attached later by `xyzSystem.System`.
         self.visualBody = None
         self.visualTrail = None
         self.label = None
@@ -43,6 +48,7 @@ class Planet:
         self.label = label
 
     def set_trail_visuals(self):
+        # Replace the trail mesh points with the most recent stored path.
         if self.visualTrail is not None and self.position_history:
             self.visualTrail.points = np.array(self.position_history, dtype=float)
 
@@ -50,6 +56,7 @@ class Planet:
         if self.visualBody is None:
             return
 
+        # VTK expects 3D coordinates even if the simulation is effectively planar.
         target_position = self.positionVector if position is None else np.array(position, dtype=float)
         padded_position = np.zeros(3, dtype=float)
         padded_position[:min(3, len(target_position))] = target_position[:3]
@@ -101,6 +108,7 @@ class Planet:
         self.y_history.append(self.positionVector[1])
 
     def append_position_history(self, position=None):
+        # Trails are stored as 3D points so the camera can orbit freely.
         target_position = self.positionVector if position is None else np.array(position, dtype=float)
         padded_position = np.zeros(3, dtype=float)
         padded_position[:min(3, len(target_position))] = target_position[:3]
