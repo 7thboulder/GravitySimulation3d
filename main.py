@@ -90,9 +90,9 @@ def main():
     solar_system = xyzSystem.System(
         create_planets(),
         dt=75000.0,
-        # central_mass=1.989e30,
-        # central_radius=6.957e8,
-        # central_color='yellow',
+        central_mass=1.989e30,
+        central_radius=6.957e8,
+        central_color='yellow',
         render_scale=1e10,
     )
     solar_system.setup_scene()
