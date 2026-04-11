@@ -46,6 +46,8 @@ class System:
         self.trail_meshes = {}
         self.trail_length = 50000
         self.camera_speed_step = 1.5
+        self.speed_of_light = 299_792_458.0
+        self.au_in_meters = 149_597_870_700.0
 
     def _as_3d_vector(self, vector):
         vector_array = np.array(vector, dtype=float)
@@ -267,9 +269,17 @@ class System:
         if self.status_text is not None:
             self.status_text.SetText(3, 'Paused' if self.is_paused else 'Running')
 
+    def _format_camera_speed(self):
+        if self.camera_speed >= self.au_in_meters:
+            return f'{self.camera_speed / self.au_in_meters:.2f} AU/s'
+        speed_ratio = self.camera_speed / self.speed_of_light
+        if speed_ratio >= 0.99:
+            return f'{speed_ratio:.2f} C'
+        return f'{self.camera_speed:.2e} m/s'
+
     def _update_speed_text(self):
         if self.speed_text is not None:
-            self.speed_text.SetText(0, f'Camera speed: {self.camera_speed:.2e}')
+            self.speed_text.SetText(0, f'Camera speed: {self._format_camera_speed()}')
 
     def increase_camera_speed(self):
         self.camera_speed *= self.camera_speed_step
