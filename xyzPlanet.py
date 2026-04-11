@@ -2,7 +2,14 @@ import numpy as np
 
 
 class Planet:
-    def __init__(self, name, velocity_vector, position_vector, mass, radius, color):
+    def __init__(
+            self,
+            name,
+            velocity_vector,
+            position_vector,
+            mass,
+            radius,
+            color):
         self.name = name
         self.velocityVector = np.array(velocity_vector, dtype=float)
         self.positionVector = np.array(position_vector, dtype=float)

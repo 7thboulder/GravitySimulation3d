@@ -44,7 +44,7 @@ class System:
         self.status_text = None
         self.speed_text = None
         self.trail_meshes = {}
-        self.trail_length = 500
+        self.trail_length = 50000
         self.camera_speed_step = 1.5
 
     def _as_3d_vector(self, vector):

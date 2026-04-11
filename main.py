@@ -69,10 +69,10 @@ def create_planets():
             '#E5E5E5',
         ),
         # xyzPlanet.Planet(
-        #     'Ton 618',
-        #     [0,0,0],
-        #     [4.467386796032222e9 * 1000,0,0],
-        #     1.3e41,
+        #     'Black Hole',
+        #     [0,75000,0],
+        #     [4.997565809872080e8 * 1000, -2e+12, 1.496e+11],
+        #     1.989e+32,
         #     6.957e8,
         #     'white'
         # ),
@@ -89,10 +89,10 @@ def create_planets():
 def main():
     solar_system = xyzSystem.System(
         create_planets(),
-        dt=10000.0,
-        central_mass=1.989e30,
-        central_radius=6.957e8,
-        central_color='yellow',
+        dt=75000.0,
+        # central_mass=1.989e30,
+        # central_radius=6.957e8,
+        # central_color='yellow',
         render_scale=1e10,
     )
     solar_system.setup_scene()
