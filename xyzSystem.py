@@ -44,7 +44,7 @@ class System:
         self.status_text = None
         self.speed_text = None
         self.trail_meshes = {}
-        self.trail_length = 50000
+        self.trail_length = 5000
         self.camera_speed_step = 1.5
         self.speed_of_light = 299_792_458.0
         self.au_in_meters = 149_597_870_700.0
