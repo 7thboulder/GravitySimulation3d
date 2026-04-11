@@ -26,7 +26,7 @@ def create_planets():
 def main():
     solar_system = xyzSystem.System(
         create_planets(),
-        dt=1000.0,
+        dt=10000.0,
         render_scale=1e10,
     )
     solar_system.setup_scene()
