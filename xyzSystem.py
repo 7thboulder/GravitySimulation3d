@@ -188,9 +188,10 @@ class System:
             'Arrow keys: look | W/A/S/D/Q/E: move | [ / ]: camera speed | Space/P: pause',
             position='upper_left',
             font_size=10,
+            color='white',
         )
-        self.status_text = self.plotter.add_text('Running', position='upper_right', font_size=10)
-        self.speed_text = self.plotter.add_text('', position='lower_left', font_size=10)
+        self.status_text = self.plotter.add_text('Running', position='upper_right', font_size=10, color='white')
+        self.speed_text = self.plotter.add_text('', position='lower_left', font_size=10, color='white')
 
         self._create_central_visual()
         for body in self.listOfInteractingBodies:
