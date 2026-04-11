@@ -92,6 +92,8 @@ def main():
     # `System` owns the simulation loop, PyVista scene, camera, and input.
     solar_system = xyzSystem.System(
         create_planets(),
+
+        # Change in time every frame in seconds. If the value is too high the physics will break.
         dt=75000.0,
 
         # Comment these three lines out if you don't want the system anchored to a center mass, ex: if you wanted to build a binary star system.
