@@ -29,6 +29,15 @@ class Planet:
         self.visualTrail = None
         self.label = None
 
+        # Time dilation factor
+        self.td_factor = 1
+
+    def set_td_factor(self, td_factor):
+        self.td_factor = td_factor
+
+    def get_td_factor(self):
+        return self.td_factor
+
     def get_body_visuals(self):
         return self.visualBody
 

@@ -1,9 +1,13 @@
+from cmath import sqrt
+
 import numpy as np
 import pyvista as pv
+from numpy.f2py.auxfuncs import throw_error
 
 
-class System:
+class IntegratedSystem:
     # Main controller for the simulation: physics stepping, rendering, camera, and UI.
+    # I have not implemented this for multiple central bodies yet
     def __init__(
         self,
         interacting_bodies: list,
@@ -11,7 +15,7 @@ class System:
         central_mass=0.0,
         central_radius=0.0,
         central_color='yellow',
-        central_name = None,
+        central_name=None,
         render_scale=1e10,
         timer_interval=16,
         camera_speed=2e10,
@@ -23,13 +27,26 @@ class System:
         # Physics constants and integration timestep.
         self.G = 6.6743e-11
         self.dt = dt
+        self.C = 299792458
+
+        # Total time
+        self.total_time = 0
+
+        for body in self.listOfInteractingBodies:
+            body.set_td_factor(self.get_gr_time_dilation_factor(body=body))
 
         # Optional fixed central mass lets planets orbit a sun without storing the sun as a body.
-        self.requiresCentral = central_mass != 0.0
+        self.requiresCentral = True
+        if central_mass == 0.0:
+            raise Exception('Central mass cannot be zero.')
         self.centralMass = central_mass
         self.central_radius = central_radius
         self.central_color = central_color
         self.central_name = central_name
+        self.central_td_factor = self.get_gr_time_dilation_factor(
+            center_pos=np.array([0.0, 0.0, 0.0]),
+            center_velocity=np.array([0.0, 0.0, 0.0]),
+        )
 
         # Renderer state and real-space camera state.
         self.plotter = None
@@ -51,6 +68,7 @@ class System:
         self.is_paused = False
         self.status_text = None
         self.speed_text = None
+        self.time_text = None
         self.trail_meshes = {}
         self.trail_length = 5000
         self.camera_speed_step = 1.5
@@ -213,8 +231,17 @@ class System:
             font_size=10,
             color='white',
         )
+
+        # Gather names from all bodies in system to display time
+        time_text_setup = 'Observer time (time for us): 0\n'
+        if self.requiresCentral:
+            time_text_setup += f'{self.central_name} time: 0\n'
+        for body in self.listOfInteractingBodies:
+            time_text_setup += f'{body.get_name()} time: 0\n'
+
         self.status_text = self.plotter.add_text('Running', position='upper_right', font_size=10, color='white')
         self.speed_text = self.plotter.add_text('', position='lower_left', font_size=10, color='white')
+        self.time_text = self.plotter.add_text(time_text_setup, position='lower_right', font_size=10, color='white')
 
         self._create_central_visual()
         for body in self.listOfInteractingBodies:
@@ -228,20 +255,91 @@ class System:
         self.sync_visuals()
         return self.plotter
 
+    def central_body_acceleration_gr(self, position_vector, velocity_vector, mass_val):
+        # Updated to still use Newtonian physics but correct with General Relativity
+        # Only for interactions between massive central bodies and smaller bodies
+
+        # Constants
+        # r = np.linalg.norm(position_vector)
+        #
+        # # Angular Momentum
+        # l_vec = np.cross(position_vector, velocity_vector)
+        # l2 = np.dot(l_vec, l_vec)
+        #
+        # if r == 0.0:
+        #     return np.zeros_like(position_vector, dtype=float)
+        #
+        # # Acceleration using Newtonian
+        # a_n = -((self.G * mass_val) / r ** 3) * position_vector
+        #
+        # # GR correction
+        # a_gr = ((3 * self.G * mass_val * l2) / (self.C ** 2 * r ** 5)) * position_vector
+        #
+        # return a_n + a_gr
+
+        r_vec = position_vector
+        v_vec = velocity_vector
+
+        r = np.linalg.norm(r_vec)
+        v2 = np.dot(v_vec, v_vec)
+
+        if r < 1e-9:
+            return np.zeros_like(position_vector, dtype=float)
+
+        r_hat = r_vec / r
+
+        vr = np.dot(r_vec, v_vec)
+
+        M = mass_val
+
+        a_n = -(self.G * M / r ** 3) * r_vec
+
+        a_gr = (self.G * M / (self.C ** 2 * r ** 3)) * (
+                (4 * self.G * M / r - v2) * r_vec
+                + 4 * vr * v_vec
+        )
+
+        return a_n + a_gr
+
     def get_single_body_acceleration(self, pos1, mass_val):
-        # Newtonian point-mass gravity toward `mass_val` from the displacement vector `pos1`.
+        # Same calculation as in xyzSystem but this is for interactions between non-central bodies like planets
         dist = np.linalg.norm(pos1)
         if dist == 0.0:
             return np.zeros_like(pos1, dtype=float)
         ag = -((self.G * mass_val) / dist ** 3) * pos1
         return ag
 
+    def get_gr_time_dilation_factor(
+            self,
+            body=None,
+            center_pos=np.array([0.0, 0.0, 0.0]),
+            center_velocity=np.array([0.0, 0.0, 0.0]),
+    ):
+        # Gets the local time of the object
+
+        if body is None:
+            velocity_vector = center_velocity
+            self_pos_vector = center_pos
+        else:
+            velocity_vector = body.get_velocity()
+            self_pos_vector = body.get_position()
+
+        phi = 0
+
+        for other in self.listOfInteractingBodies:
+            if other != body:
+                r = np.linalg.norm(self_pos_vector - other.get_position())
+                phi += -(self.G * other.get_mass()) / r
+
+        tau_factor = np.sqrt(1 + ((2 * phi) / self.C ** 2) - (np.linalg.norm(velocity_vector) ** 2 / self.C ** 2))
+        return tau_factor
+
     def update_all(self, _frame=None):
         # Advance all bodies by one simulation timestep.
         for body in self.listOfInteractingBodies:
             total_acc = np.zeros_like(body.get_position(), dtype=float)
             if self.requiresCentral:
-                total_acc += self.get_single_body_acceleration(body.get_position(), self.centralMass)
+                total_acc += self.central_body_acceleration_gr(body.get_position(), body.get_velocity(), self.centralMass)
 
             # Sum the contribution from every other body in the system.
             for body_to_compare in self.listOfInteractingBodies:
@@ -295,6 +393,20 @@ class System:
     def _update_status_text(self):
         if self.status_text is not None:
             self.status_text.SetText(3, 'Paused' if self.is_paused else 'Running')
+
+    def _update_time_text(self):
+        if self.time_text is not None:
+            try:
+                text_to_show = f'Observer time (time for us): {self.total_time}\n'
+                if self.requiresCentral:
+                    text_to_show += f'{self.central_name} time: {self.total_time * self.central_td_factor}\n'
+                for body in self.listOfInteractingBodies:
+                    text_to_show += f'{body.get_name()} time: {self.total_time * body.get_td_factor()}\n'
+
+                self.time_text.SetText(1, text_to_show)
+            except Exception as e:
+                print("time text update failed:", e)
+
 
     def _format_camera_speed(self):
         # Show camera speed in the most readable unit for the current scale.
@@ -357,10 +469,14 @@ class System:
         frame_dt = self.timer_interval / 1000.0
         if not self.is_paused:
             self.update_all()
+
         self.update_camera(frame_dt)
         self.sync_visuals()
         self._update_status_text()
         self._update_speed_text()
+        if not self.is_paused:
+            self.total_time += self.dt
+            self._update_time_text()
         self._force_surface_rendering()
         self.plotter.render()
 

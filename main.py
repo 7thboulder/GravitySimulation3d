@@ -100,6 +100,7 @@ def main():
         central_mass=1.989e30,
         central_radius=6.957e8,
         central_color='yellow',
+        central_name = 'Sun',
         #
 
         render_scale=1e10,
