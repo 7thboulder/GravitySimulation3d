@@ -2,9 +2,10 @@ from cmath import sqrt
 
 import numpy as np
 import pyvista as pv
+from einsteinpy.plotting import GeodesicPlotter
 from numpy.f2py.auxfuncs import throw_error
 from einsteinpy.metric import Schwarzschild
-from einsteinpy.geodesic import Geodesic
+from einsteinpy.geodesic import Geodesic, Timelike
 import astropy.units as u
 
 
@@ -81,12 +82,128 @@ class SchwarzschildSystem:
 
         # Schwarzschild Metric stuff
         self.rs = 2
-        self.isco = 6
+        self.ISCO = 6
+        self.rs_meters = 3.9e14
 
 
+    # Schwarzschild Metric defs
+
+    def r_to_meters(self, r_geom, M_kg):
+        return r_geom * self.G * M_kg / self.C**2
+
+    # r = radial coordinate in M-units (r=40 means 40 gravitational radii)
+    # θ = polar angle. Always set to pi/2 for equatorial orbits
+    # ϕ = azimuthal angle. Set to 0 as reference
+
+    # p_r = radial momentum. 0 if starting at perihelion/aphelion
+    # p_θ = polar momentum. 0 for equatorial (θ = pi/2, stays there)
+    # p_ϕ angular momentum L. This is what is tuned to set orbit shape
+
+    # For a CIRCULAR orbit at radius r (in M-units):
+    # L_circular = r / sqrt(r - 3)
+    # (exact GR result — diverges at r=3, the photon sphere)
+    #
+    # For an ELLIPTICAL orbit:
+    # Start at perihelion with p_r = 0.
+    # L > L_circular → aphelion further out (more eccentric)
+    # L < L_circular → orbit spirals inward (unstable if r < ISCO)
+    #
+    # For ESCAPE trajectory:
+    # Set p_r > 0 (moving outward) and L to whatever azimuthal kick you want.
+
+    def circular_L(self, r):
+        """
+        Angular momentum for a circular orbit at r in M-units
+        Returns nan if r <= 3 which means r is in the photon sphere and there is no circular timelike orbit
+        """
+        if r <= 3.0:
+            return float("nan")
+        return r / np.sqrt(r - 3.0)
+
+    def is_stable(self, r):
+        """Circular orbits are only stable when r >= 6 as the ISCO = 6"""
+        return r >= self.ISCO
+
+    def metres_to_M(self, r_metres, M_kg):
+
+        r_gravitational = self.G * M_kg / self.C ** 2  # 1 M-unit in metres
+        return r_metres / r_gravitational
+
+    def calculate_circular_orbit(self, r0):
+        """
+        r0 is the radius from the central mass' center in M-units
+        """
+
+        L = self.circular_L(r0)
+
+        position = [r0, np.pi / 2, 0.]
+        momentum = [0., 0., self.circular_L(r0)]
+
+        # Calculating steps needed for full orbit calculation
+        T = 2 * np.pi * r0**(3/2) # Period in M units
+        delta = 0.1
+        n_orbits = 1
+
+        steps = int((n_orbits * T)/delta)
+
+        geod = Timelike(
+            metric="Schwarzschild",
+            metric_params=(),
+            position=position,
+            momentum=momentum,
+            steps=steps,
+            delta=delta,
+            omega=0.01,
+            rtol=1e-6,
+            atol=1e-6,
+            return_cartesian=True,
+            suppress_warnings=False,
+        )
+
+        lambdas, vecs = geod.trajectory
+        # print("Columns [t, r, θ, φ, p_t, p_r, p_θ, p_φ]")
+        # print("First row:", vecs[0])
+        # print("Last row:", vecs[-1])
+        # print("r range:", vecs[:, 1].min(), "to", vecs[:, 1].max())
+        # print("phi range:", vecs[:, 3].min(), "to", vecs[:, 3].max())
+
+        # phi_unwrapped = np.unwrap(vecs[:, 3])
+        # n_orbits = (phi_unwrapped[-1] - phi_unwrapped[0]) / (2 * np.pi)
+        # print(f"Completed {n_orbits:.2f} orbits")
+
+        x, y, z = vecs[:, 1], vecs[:, 2], vecs[:, 3]
+        p_x, p_y, p_z = vecs[:, 5], vecs[:, 6], vecs[:, 7]
+
+        phi = np.arctan2(y, x)  # full -π to π
+        phi_unwrapped = np.unwrap(phi)  # accumulates continuously
+
+        n_completed = (phi_unwrapped[-1] - phi_unwrapped[0]) / (2 * np.pi)
+        print(f"Completed {n_completed:.2f} orbits")
+
+        # CHECK THIS!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+        x = self.r_to_meters(r0, 1.3e41)
+        y = self.r_to_meters(r0, 1.3e41)
+        z = self.r_to_meters(r0, 1.3e41)
 
 
+        p_x *= self.C
+        p_y *= self.C
+        p_z *= self.C
 
+        # gpl = GeodesicPlotter()
+        # gpl.plot(geod, color="green")
+        # gpl.show()
+        #
+        # gpl.clear()  # In Interactive mode, `clear()` must be called before drawing another plot, to avoid overlap
+        # gpl.plot2D(geod, coordinates=(1, 2), color="green", title="Top/Bottom View")  # "top" / "bottom" view
+        # gpl.show()
+        #
+        # gpl.clear()
+        # gpl.plot2D(geod, coordinates=(1, 3), color="green", title="Face-On View")  # "face-on" view
+        # gpl.show()
+
+
+    # End of Schwarzschild Metric
 
     def _as_3d_vector(self, vector):
         # Normalize any 2D/3D input into a 3D vector for rendering math.
@@ -452,6 +569,22 @@ class SchwarzschildSystem:
 
         if self.label_points is not None:
             self.label_points.points = np.array(label_positions, dtype=float)
+
+    # def update_frame(self, _caller=None, _event=None):
+    #     # Timer callback: step physics, move camera, sync meshes, then render.
+    #     frame_dt = self.timer_interval / 1000.0
+    #     if not self.is_paused:
+    #         self.update_all()
+    #
+    #     self.update_camera(frame_dt)
+    #     self.sync_visuals()
+    #     self._update_status_text()
+    #     self._update_speed_text()
+    #     if not self.is_paused:
+    #         self.total_time += self.dt
+    #         self._update_time_text()
+    #     self._force_surface_rendering()
+    #     self.plotter.render()
 
     def update_frame(self, _caller=None, _event=None):
         # Timer callback: step physics, move camera, sync meshes, then render.

@@ -20,6 +20,14 @@ def create_planets():
             (0.79*6.957e8),
             'yellow',
         ),
+        # xyzPlanet.Planet(
+        #     'Sun 3',
+        #     [-20000, 12161, 0],
+        #     [0, -7.99e10, 7e10],
+        #     9.945e29,
+        #     6.957e8,
+        #     'yellow',
+        # ),
     ]
 
 
