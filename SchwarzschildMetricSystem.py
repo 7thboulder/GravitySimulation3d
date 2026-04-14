@@ -3,11 +3,15 @@ from cmath import sqrt
 import numpy as np
 import pyvista as pv
 from numpy.f2py.auxfuncs import throw_error
+from einsteinpy.metric import Schwarzschild
+from einsteinpy.geodesic import Geodesic
+import astropy.units as u
 
 
-class IntegratedSystem:
+class SchwarzschildSystem:
     # Main controller for the simulation: physics stepping, rendering, camera, and UI.
     # I have not implemented this for multiple central bodies yet
+    # Central body is what the Schwarzschild metric here calculates for
     def __init__(
         self,
         interacting_bodies: list,
@@ -74,6 +78,15 @@ class IntegratedSystem:
         self.camera_speed_step = 1.5
         self.speed_of_light = 299_792_458.0
         self.au_in_meters = 149_597_870_700.0
+
+        # Schwarzschild Metric stuff
+        self.rs = 2
+        self.isco = 6
+
+
+
+
+
 
     def _as_3d_vector(self, vector):
         # Normalize any 2D/3D input into a 3D vector for rendering math.
@@ -260,46 +273,22 @@ class IntegratedSystem:
         # Only for interactions between massive central bodies and smaller bodies
 
         # Constants
-        # r = np.linalg.norm(position_vector)
-        #
-        # # Angular Momentum
+        r = np.linalg.norm(position_vector)
+
+        # Angular Momentum
         # l_vec = np.cross(position_vector, velocity_vector)
         # l2 = np.dot(l_vec, l_vec)
-        #
-        # if r == 0.0:
-        #     return np.zeros_like(position_vector, dtype=float)
-        #
-        # # Acceleration using Newtonian
-        # a_n = -((self.G * mass_val) / r ** 3) * position_vector
-        #
-        # # GR correction
-        # a_gr = ((3 * self.G * mass_val * l2) / (self.C ** 2 * r ** 5)) * position_vector
-        #
-        # return a_n + a_gr
 
-        r_vec = position_vector
-        v_vec = velocity_vector
-
-        r = np.linalg.norm(r_vec)
-        v2 = np.dot(v_vec, v_vec)
-
-        if r < 1e-9:
+        if r == 0.0:
             return np.zeros_like(position_vector, dtype=float)
 
-        r_hat = r_vec / r
+        # Acceleration using Newtonian
+        a_n = -((self.G * mass_val) / r ** 3) * position_vector
 
-        vr = np.dot(r_vec, v_vec)
+        # GR correction
+        # a_gr = ((3 * self.G * mass_val * l2) / (self.C ** 2 * r ** 5)) * position_vector
 
-        M = mass_val
-
-        a_n = -(self.G * M / r ** 3) * r_vec
-
-        a_gr = (self.G * M / (self.C ** 2 * r ** 3)) * (
-                (4 * self.G * M / r - v2) * r_vec
-                + 4 * vr * v_vec
-        )
-
-        return a_n + a_gr
+        return a_n
 
     def get_single_body_acceleration(self, pos1, mass_val):
         # Same calculation as in xyzSystem but this is for interactions between non-central bodies like planets

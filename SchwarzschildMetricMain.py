@@ -1,5 +1,5 @@
 import xyzPlanet
-import NewtonGRSystem
+import SchwarzschildMetricSystem
 
 
 def create_planets():
@@ -98,7 +98,7 @@ def create_planets():
 # You must add a central body for this first version of the NewtonGRSystem
 def main():
     # `System` owns the simulation loop, PyVista scene, camera, and input.
-    solar_system = NewtonGRSystem.IntegratedSystem(
+    solar_system = NewtonGRSystem.SchwarzschildSystem(
         create_planets(),
 
         # Change in time every frame in seconds. If the value is too high the physics will break.
