@@ -188,7 +188,6 @@ def get_trajectory_state_vector(geod_or_vecs, mass, m_units=False):
     G = 6.674e-11
     M_to_meters = G * mass / C**2
 
-    # Accept either a geodesic object or a raw (N,8) array
     if isinstance(geod_or_vecs, np.ndarray):
         vecs = geod_or_vecs
     else:
@@ -197,8 +196,21 @@ def get_trajectory_state_vector(geod_or_vecs, mass, m_units=False):
     r = np.sqrt(vecs[:,1]**2 + vecs[:,2]**2 + vecs[:,3]**2)
 
     r_min = 2.0
-    r_max = 1e5
+    r_max = 1e4
 
+    # ---- KEY FIX: strip any points where r jumps discontinuously ----
+    # A real geodesic changes r smoothly — a sudden jump means the integrator diverged
+    dr = np.abs(np.diff(r))
+    dr_median = np.median(dr)
+    diverge_idx = np.where(dr > dr_median * 1000)[0]  # 1000x median step = diverged
+
+    if diverge_idx.size > 0:
+        cutoff = diverge_idx[0] + 1   # trim everything after first big jump
+        vecs = vecs[:cutoff]
+        r    = r[:cutoff]
+        print(f"Trimmed divergent tail at step {cutoff}/{len(r)}")
+
+    # Now determine fate from the trimmed trajectory
     if r[-1] <= r_min:
         fate = "captured"
     elif r[-1] >= r_max:
@@ -213,12 +225,11 @@ def get_trajectory_state_vector(geod_or_vecs, mass, m_units=False):
     last_out = np.where(outside)[0][-1]
 
     if fate == "captured" and last_out + 1 < len(r):
-        # Interpolate exact surface crossing — ray ends precisely on sphere
-        t = (r_min - r[last_out]) / (r[last_out + 1] - r[last_out])
-        crossing = vecs[last_out, 1:4] + t * (vecs[last_out + 1, 1:4] - vecs[last_out, 1:4])
-        pos = np.vstack([vecs[:last_out + 1, 1:4], crossing])
-        mom = np.vstack([vecs[:last_out + 1, 5:8],
-                         vecs[last_out, 5:8] + t * (vecs[last_out + 1, 5:8] - vecs[last_out, 5:8])])
+        t = (r_min - r[last_out]) / (r[last_out+1] - r[last_out])
+        crossing = vecs[last_out, 1:4] + t * (vecs[last_out+1, 1:4] - vecs[last_out, 1:4])
+        pos = np.vstack([vecs[:last_out+1, 1:4], crossing])
+        mom = np.vstack([vecs[:last_out+1, 5:8],
+                         vecs[last_out, 5:8] + t * (vecs[last_out+1, 5:8] - vecs[last_out, 5:8])])
     else:
         mask = outside & (r < r_max)
         pos = vecs[mask, 1:4]
@@ -228,16 +239,14 @@ def get_trajectory_state_vector(geod_or_vecs, mass, m_units=False):
         return None, None, fate
 
     if m_units:
-        x, y, z = pos[:, 0], pos[:, 1], pos[:, 2]
-        px, py, pz = mom[:, 0], mom[:, 1], mom[:, 2]
+        x, y, z = pos[:,0], pos[:,1], pos[:,2]
+        px, py, pz = mom[:,0], mom[:,1], mom[:,2]
     else:
-        x, y, z = pos[:, 0] * M_to_meters, pos[:, 1] * M_to_meters, pos[:, 2] * M_to_meters
-        px, py, pz = mom[:, 0] * C, mom[:, 1] * C, mom[:, 2] * C
+        x, y, z = pos[:,0]*M_to_meters, pos[:,1]*M_to_meters, pos[:,2]*M_to_meters
+        px, py, pz = mom[:,0]*C, mom[:,1]*C, mom[:,2]*C
 
     print(f"Ray fate: {fate}, {len(x)} points")
-    print(f"Ray r range: {r[outside].min():.1f} to {r[outside].max():.1f} M-units")
-
-    return np.array([x, y, z]), np.array([px, py, pz]), fate
+    return np.array([x,y,z]), np.array([px,py,pz]), fate
 
 def calculate_null_geodesic(x, y, z, dx, dy, dz, steps=200000, delta=0.01):
     """
@@ -275,21 +284,17 @@ def calculate_null_geodesic(x, y, z, dx, dy, dz, steps=200000, delta=0.01):
     return geod
 
 def calculate_null_geodesic_smart(x, y, z, dx, dy, dz, r_max=1e4):
-    """
-    Integrates in chunks and stops early once fate is determined.
-    Avoids wasting steps on a ray that escaped at step 100 out of 200000.
-    """
     r, theta, phi = cartesian_to_schwarzschild(x, y, z)
     p_r, p_theta, p_phi = cartesian_to_spherical_momentum(x, y, z, dx, dy, dz)
 
     position = [r, theta, phi]
     momentum = [p_r, p_theta, p_phi]
 
-    chunk_size = 5000
+    chunk_size = 2000
     delta = 0.1 if r > 20 else 0.01
     all_vecs = []
 
-    for _ in range(40):   # max 40 chunks = 200000 steps
+    for i in range(100):
         geod = Nulllike(
             metric="Schwarzschild",
             metric_params=(),
@@ -300,29 +305,40 @@ def calculate_null_geodesic_smart(x, y, z, dx, dy, dz, r_max=1e4):
             omega=0.0,
             rtol=1e-9,
             atol=1e-9,
-            return_cartesian=True,
+            return_cartesian=True,   # Cartesian output for plotting
             suppress_warnings=True,
         )
 
         lambdas, vecs = geod.trajectory
         all_vecs.append(vecs)
 
-        # Check current r
-        r_current = np.sqrt(vecs[-1,1]**2 + vecs[-1,2]**2 + vecs[-1,3]**2)
+        # Last point in Cartesian
+        cx, cy, cz = vecs[-1, 1], vecs[-1, 2], vecs[-1, 3]
+        r_current = np.sqrt(cx**2 + cy**2 + cz**2)
 
         if r_current <= 2.0:
-            print(f"Captured after {len(all_vecs)*chunk_size} steps")
+            print(f"Captured after {(i+1)*chunk_size} steps")
             break
         if r_current >= r_max:
-            print(f"Escaped after {len(all_vecs)*chunk_size} steps")
+            print(f"Escaped after {(i+1)*chunk_size} steps")
             break
 
-        # Tighten step near the black hole
-        delta = 0.01 if r_current < 20 else 0.1
+        # ---- KEY FIX: convert Cartesian back to Schwarzschild for next chunk ----
+        # Position
+        r_new, theta_new, phi_new = cartesian_to_schwarzschild(cx, cy, cz)
 
-        # Resume from where we left off
-        position = list(vecs[-1, 1:4])    # NOTE: these are cartesian from einsteinpy
-        momentum = list(vecs[-1, 5:8])
+        # Momentum: vecs[:,5:8] are Cartesian p_x, p_y, p_z
+        # Convert back to covariant Schwarzschild using current position
+        dpx, dpy, dpz = vecs[-1, 5], vecs[-1, 6], vecs[-1, 7]
+        p_r_new, p_theta_new, p_phi_new = cartesian_to_spherical_momentum(
+            cx, cy, cz, dpx, dpy, dpz
+        )
+
+        position = [r_new, theta_new, phi_new]
+        momentum = [p_r_new, p_theta_new, p_phi_new]
+
+        # Adjust step size based on new r
+        delta = 0.01 if r_current < 20 else 0.1
 
     return np.vstack(all_vecs)
 
