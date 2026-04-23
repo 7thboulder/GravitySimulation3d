@@ -7,11 +7,109 @@ from einsteinpy.geodesic import Geodesic, Timelike, Nulllike
 import astropy.units as u
 import matplotlib as mp
 import matplotlib.pyplot as plt
+from scipy.integrate import solve_ivp
 
 G = 6.6743e-11
 C = 299792458
 ISCO = 6
 rs = 2
+
+
+
+def geodesic_odes(lamb, state):
+    """
+    Schwarzschild null geodesic equations in Schwarzschild coordinates.
+    state = [r, theta, phi, p_r, p_theta, p_phi]
+    M = 1 (geometrized units)
+    """
+    r, theta, phi, p_r, p_theta, p_phi = state
+
+    f     = 1 - 2/r
+    sin_t = np.sin(theta)
+    cos_t = np.cos(theta)
+
+    # Conserved quantities
+    # E = f * p^t,  L = p_phi  (covariant)
+    # From normalization: E² = f(p_r²*f + p_theta²/r² + p_phi²/(r²sin²θ))
+    E_sq = f * (p_r**2 * f + p_theta**2/r**2 + p_phi**2/(r**2 * sin_t**2))
+
+    # Equations of motion (geodesic equations)
+    dr_dl      = f * p_r
+    dtheta_dl  = p_theta / r**2
+    dphi_dl    = p_phi   / (r**2 * sin_t**2)
+
+    # Hamilton-Jacobi: dp_i/dλ = -½ ∂g^{µν}/∂x^i * p_µ p_ν
+    dp_r_dl     = ( -(1/r**2) * p_r**2 * f
+                    + (1/r**3) * p_theta**2
+                    + (1/r**3) * p_phi**2 / sin_t**2
+                    - (1/r**2) * E_sq / f )
+
+    dp_theta_dl = ( cos_t / (r**2 * sin_t**3) ) * p_phi**2
+
+    dp_phi_dl   = 0.0   # phi is cyclic → p_phi is conserved
+
+    return [dr_dl, dtheta_dl, dphi_dl, dp_r_dl, dp_theta_dl, dp_phi_dl]
+
+
+def event_captured(lamb, state):
+    """Stop when ray hits event horizon r = 2"""
+    return state[0] - 2.0
+event_captured.terminal  = True
+event_captured.direction = -1   # only trigger when r is decreasing
+
+
+def event_escaped(lamb, state, r_max=1e4):
+    """Stop when ray escapes to r_max"""
+    return state[0] - r_max
+event_escaped.terminal  = True
+event_escaped.direction = 1    # only trigger when r is increasing
+
+
+def calculate_null_geodesic_fast(x, y, z, dx, dy, dz, r_max=1e4, max_steps=10000):
+    """
+    Direct scipy integration — ~10-50x faster than einsteinpy,
+    with proper early termination.
+    """
+    r, theta, phi = cartesian_to_schwarzschild(x, y, z)
+    p_r, p_theta, p_phi = cartesian_to_spherical_momentum(x, y, z, dx, dy, dz)
+
+    state0 = [r, theta, phi, p_r, p_theta, p_phi]
+
+    # λ span — scale to starting r so we don't under/over-integrate
+    lambda_max = r * 500
+
+    sol = solve_ivp(
+        geodesic_odes,
+        t_span=(0, lambda_max),
+        y0=state0,
+        method='RK45',
+        events=[event_captured, lambda l, s: event_escaped(l, s, r_max)],
+        rtol=1e-9,
+        atol=1e-9,
+        dense_output=False,
+        max_step=r/10,      # never take steps larger than r/10
+    )
+
+    # Convert Schwarzschild trajectory back to Cartesian for plotting
+    r_arr     = sol.y[0]
+    theta_arr = sol.y[1]
+    phi_arr   = sol.y[2]
+
+    x_arr = r_arr * np.sin(theta_arr) * np.cos(phi_arr)
+    y_arr = r_arr * np.sin(theta_arr) * np.sin(phi_arr)
+    z_arr = r_arr * np.cos(theta_arr)
+
+    # Determine fate
+    if sol.t_events[0].size > 0:
+        fate = "captured"
+    elif sol.t_events[1].size > 0:
+        fate = "escaped"
+    else:
+        fate = "incomplete"
+
+    print(f"Fate: {fate}, {len(r_arr)} steps, r range: {r_arr.min():.2f} to {r_arr.max():.2f}")
+
+    return np.array([x_arr, y_arr, z_arr]), fate
 
 def r_to_meters(r_geom, M_kg):
     return r_geom * G * M_kg / C ** 2
@@ -433,28 +531,59 @@ def impact_param_to_dy(r0, b_target):
     dy_sq = (b_target**2 * r0**2) / (r0**2 - b_target**2 * f)
     return np.sqrt(dy_sq)
 
-b_crit = 3 * np.sqrt(3)   # ≈ 5.196
+# b_crit = 3 * np.sqrt(3)   # ≈ 5.196
+#
+# r0 = 50
+# dy_captured  = impact_param_to_dy(r0, b_crit * 0.99)  # just inside
+# dy_critical  = impact_param_to_dy(r0, b_crit)          # exactly critical
+# dy_escaped   = impact_param_to_dy(r0, b_crit * 1.01)  # just outside
+#
+#
+# black_hole_null_geod = calculate_null_geodesic_smart(r0, 0 , 0, -r0, dy_critical, 0)
+#
+# position, momentum, fate = get_trajectory_state_vector(black_hole_null_geod, black_hole_mass, True)
+# points = np.column_stack([position[0], position[1], position[2]])
+#
+# x = []
+# y = []
+# r_is_greater = True
+# for i in range(position[0].size):
+#     if np.sqrt(position[0][i] ** 2 + position[1][i] ** 2) >= 2.05 and r_is_greater:
+#         x.append(position[0][i])
+#         y.append(position[1][i])
+#     else:
+#         r_is_greater = False
+# light_ray = plt.plot(x, y, markersize=6)
+#
+# plt.show()
 
+b_crit = 3 * np.sqrt(3)
 r0 = 50
-dy_captured  = impact_param_to_dy(r0, b_crit * 0.99)  # just inside
-dy_critical  = impact_param_to_dy(r0, b_crit)          # exactly critical
-dy_escaped   = impact_param_to_dy(r0, b_crit * 1.01)  # just outside
 
+COLORS = {"captured": "red", "escaped": "yellow", "incomplete": "grey"}
 
-black_hole_null_geod = calculate_null_geodesic_smart(r0, 0 , 0, -r0, dy_critical, 0)
+test_rays = [
+    (b_crit * 0.95, "captured"),
+    (b_crit,        "photon sphere"),
+    (b_crit * 1.05, "escaped"),
+    (b_crit * 2.0,  "far escape"),
+]
 
-position, momentum, fate = get_trajectory_state_vector(black_hole_null_geod, black_hole_mass, True)
-points = np.column_stack([position[0], position[1], position[2]])
+fig, ax = plt.subplots(figsize=(8, 8))
+ax.set_xlim(-r0, r0)
+ax.set_ylim(-r0, r0)
+ax.set_aspect('equal')
+ax.set_facecolor('black')
 
-x = []
-y = []
-r_is_greater = True
-for i in range(position[0].size):
-    if np.sqrt(position[0][i] ** 2 + position[1][i] ** 2) >= 2.05 and r_is_greater:
-        x.append(position[0][i])
-        y.append(position[1][i])
-    else:
-        r_is_greater = False
-light_ray = plt.plot(x, y, markersize=6)
+black_hole   = plt.Circle((0, 0), 2, color='black',  zorder=5)
+photon_sphere = plt.Circle((0, 0), 3, color='white', fill=False, linestyle='--', zorder=4)
+ax.add_artist(black_hole)
+ax.add_artist(photon_sphere)
 
+for b, label in test_rays:
+    dy = impact_param_to_dy(r0, b)
+    position, fate = calculate_null_geodesic_fast(r0, 0, 0, -r0, dy, 0)
+    ax.plot(position[0], position[1], color=COLORS[fate], label=f"{label} b={b:.2f}", linewidth=1)
+
+ax.legend(loc='upper right', facecolor='black', labelcolor='white')
 plt.show()
