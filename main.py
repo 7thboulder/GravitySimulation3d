@@ -70,21 +70,21 @@ def create_planets():
             2.44e6,
             '#E5E5E5',
         ),
-        xyzPlanet.Planet(
-            'Black Hole',
-            [0,75000,0],
-            [4.997565809872080e8 * 1000, -2e+12, 1.496e+11],
-            1.989e+32,
-            6.957e8,
-            'white'
-        ),
-        xyzPlanet.Planet('Sun',
-                         [0,0,0],
-                         [0,0,0],
-                         1.989e30,
-                         6.957e8,
-                         'yellow'
-        ),
+        # xyzPlanet.Planet(
+        #     'Black Hole',
+        #     [0,75000,0],
+        #     [4.997565809872080e8 * 1000, -2e+12, 1.496e+11],
+        #     1.989e+32,
+        #     6.957e8,
+        #     'white'
+        # ),
+        # xyzPlanet.Planet('Sun',
+        #                  [0,0,0],
+        #                  [0,0,0],
+        #                  1.989e30,
+        #                  6.957e8,
+        #                  'yellow'
+        # ),
     ]
 
 
@@ -97,9 +97,9 @@ def main():
         dt=75000.0,
 
         # Comment these three lines out if you don't want the system anchored to a center mass, ex: if you wanted to build a binary star system.
-        # central_mass=1.989e30,
-        # central_radius=6.957e8,
-        # central_color='yellow',
+        central_mass=1.989e30,
+        central_radius=6.957e8,
+        central_color='yellow',
         central_name = 'Sun',
         #
 

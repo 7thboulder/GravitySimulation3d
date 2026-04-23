@@ -32,6 +32,15 @@ class Planet:
         # Time dilation factor
         self.td_factor = 1
 
+        self.schwarzschild_position_vector_array = None
+        self.schwarzschild_velocity_vector_array = None
+
+    def set_schwarzschild_position_vector(self, schwarzschild_position_vector):
+        self.schwarzschild_position_vector = schwarzschild_position_vector
+
+    def set_schwarzschild_velocity(self, schwarzschild_velocity):
+        self.schwarzschild_velocity_vector = schwarzschild_velocity
+
     def set_td_factor(self, td_factor):
         self.td_factor = td_factor
 

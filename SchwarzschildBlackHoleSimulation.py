@@ -1,70 +1,60 @@
-from cmath import sqrt
-
 import numpy as np
 import pyvista as pv
 from einsteinpy.plotting import GeodesicPlotter
 from numpy.f2py.auxfuncs import throw_error
 from einsteinpy.metric import Schwarzschild
-from einsteinpy.geodesic import Geodesic, Timelike
+from einsteinpy.geodesic import Geodesic, Timelike, Nulllike
 import astropy.units as u
+import matplotlib as mp
 
-
-class SchwarzschildSystem:
-    # Main controller for the simulation: physics stepping, rendering, camera, and UI.
-    # I have not implemented this for multiple central bodies yet
-    # Central body is what the Schwarzschild metric here calculates for
+class BlackHoleSimulation:
     def __init__(
-        self,
-        interacting_bodies: list,
-        dt: float,
-        central_mass=0.0,
-        central_radius=0.0,
-        central_color='yellow',
-        central_name=None,
-        render_scale=1e10,
-        timer_interval=16,
-        camera_speed=2e10,
-        rotation_speed=1.5,
+            self,
+            central_mass: float,
+            central_color: str,
+            central_name: str,
+            dt: float,
+            timer_interval=16,
+            rotation_speed=1.5,
     ):
-        # Bodies whose positions are advanced each frame.
-        self.listOfInteractingBodies = interacting_bodies
 
-        # Physics constants and integration timestep.
+        self.central_mass = central_mass
         self.G = 6.6743e-11
-        self.dt = dt
         self.C = 299792458
 
-        # Total time
-        self.total_time = 0
+        # 1 M-unit in meters
+        self.M_in_meters = self.G * self.central_mass / self.C ** 2
 
-        self.frame_count = 0
+        # Fix: 1 render unit = 1 M-unit
+        # so render_scale = M_in_meters, and all M-unit distances map 1:1 to render units
+        self.render_scale = self.M_in_meters
 
-        for body in self.listOfInteractingBodies:
-            body.set_td_factor(self.get_gr_time_dilation_factor(body=body))
+        self.central_radius = 2 * self.M_in_meters  # exact event horizon in meters
 
-        # Optional fixed central mass lets planets orbit a sun without storing the sun as a body.
-        self.requiresCentral = True
-        if central_mass == 0.0:
-            raise Exception('Central mass cannot be zero.')
-        self.centralMass = central_mass
-        self.central_radius = central_radius
+        # Camera starts 200 M-units back — always sensible regardless of mass
+        self.camera_position = np.array([0.0, -200.0 * self.M_in_meters,
+                                         50.0 * self.M_in_meters], dtype=float)
+        self.camera_speed = 10.0 * self.M_in_meters  # 10 M-units/sec
+
         self.central_color = central_color
         self.central_name = central_name
-        self.central_td_factor = self.get_gr_time_dilation_factor(
-            center_pos=np.array([0.0, 0.0, 0.0]),
-            center_velocity=np.array([0.0, 0.0, 0.0]),
-        )
 
-        # Renderer state and real-space camera state.
+
+
+
+        #Schwarzschild Metric stuff
+        self.rs = 2
+        self.ISCO = 6
+        self.negligible_bend_distance = 30
+        self.light_rays = []
+
+        # Graphics variables
         self.plotter = None
         self.timer_interval = timer_interval
-        self.render_scale = render_scale
         self.pressed_keys = set()
 
-        self.camera_position = np.array([0.0, -3.0 * render_scale, render_scale], dtype=float)
         self.yaw = np.pi / 2.0
         self.pitch = -0.2
-        self.camera_speed = camera_speed
         self.rotation_speed = rotation_speed
 
         # Handles to scene objects that need to be updated over time.
@@ -75,19 +65,13 @@ class SchwarzschildSystem:
         self.is_paused = False
         self.status_text = None
         self.speed_text = None
-        self.time_text = None
         self.trail_meshes = {}
         self.trail_length = 5000
         self.camera_speed_step = 1.5
         self.speed_of_light = 299_792_458.0
         self.au_in_meters = 149_597_870_700.0
 
-        # Schwarzschild Metric stuff
-        self.rs = 2
-        self.ISCO = 6
 
-
-    # Schwarzschild Metric defs
 
     def r_to_meters(self, r_geom, M_kg):
         return r_geom * self.G * M_kg / self.C**2
@@ -255,30 +239,51 @@ class SchwarzschildSystem:
 
         return
 
-    def get_trajectory_state_vector(self, geod, r0, mass):
-        """
-        Input an einsteinpy geodesic and this will return the cartesian state vector for the orbit in the form [(x, y, z), (p_x, p_y, p_z)] in meters and m/s
-        """
+    def get_trajectory_state_vector(self, geod, mass):
+        G = 6.674e-11
+        M_to_meters = G * mass / self.C ** 2
 
         lambdas, vecs = geod.trajectory
+        r = np.sqrt(vecs[:, 1] ** 2 + vecs[:, 2] ** 2 + vecs[:, 3] ** 2)
 
-        x, y, z = vecs[:, 1], vecs[:, 2], vecs[:, 3]
-        p_x, p_y, p_z = vecs[:, 5], vecs[:, 6], vecs[:, 7]
+        r_min = 2.0
+        r_max = 1e5
 
-        phi = np.arctan2(y, x)  # full -π to π
-        phi_unwrapped = np.unwrap(phi)  # accumulates continuously
+        if r[-1] <= r_min:
+            fate = "captured"
+        elif r[-1] >= r_max:
+            fate = "escaped"
+        else:
+            fate = "incomplete"
 
-        n_completed = (phi_unwrapped[-1] - phi_unwrapped[0]) / (2 * np.pi)
+        outside = r > r_min
+        if not outside.any():
+            return None, None, fate
 
-        x = self.r_to_meters(r0, mass)
-        y = self.r_to_meters(r0, mass)
-        z = self.r_to_meters(r0, mass)
+        last_out = np.where(outside)[0][-1]
 
-        p_x *= self.C
-        p_y *= self.C
-        p_z *= self.C
+        if fate == "captured" and last_out + 1 < len(r):
+            # Interpolate exact surface crossing — ray ends precisely on sphere
+            t = (r_min - r[last_out]) / (r[last_out + 1] - r[last_out])
+            crossing = vecs[last_out, 1:4] + t * (vecs[last_out + 1, 1:4] - vecs[last_out, 1:4])
+            pos = np.vstack([vecs[:last_out + 1, 1:4], crossing])
+            mom = np.vstack([vecs[:last_out + 1, 5:8],
+                             vecs[last_out, 5:8] + t * (vecs[last_out + 1, 5:8] - vecs[last_out, 5:8])])
+        else:
+            mask = outside & (r < r_max)
+            pos = vecs[mask, 1:4]
+            mom = vecs[mask, 5:8]
 
-        return np.array([x, y, z]), np.array([p_x, p_y, p_z])
+        if len(pos) < 2:
+            return None, None, fate
+
+        x, y, z = pos[:, 0] * M_to_meters, pos[:, 1] * M_to_meters, pos[:, 2] * M_to_meters
+        px, py, pz = mom[:, 0] * self.C, mom[:, 1] * self.C, mom[:, 2] * self.C
+
+        print(f"Ray fate: {fate}, {len(x)} points")
+        print(f"Ray r range: {r[outside].min():.1f} to {r[outside].max():.1f} M-units")
+
+        return np.array([x, y, z]), np.array([px, py, pz]), fate
 
 
 
@@ -295,7 +300,114 @@ class SchwarzschildSystem:
         gpl.plot2D(geod, coordinates=(1, 3), color="green", title="Face-On View")  # "face-on" view
         gpl.show()
 
-    # End of Schwarzschild Metric
+# Raytracing physics
+
+    def calculate_null_geodesic(self, x, y, z, dx, dy, dz, steps=10000, delta=0.01):
+        """
+        x,y,z   : starting position in M-units (Cartesian)
+        dx,dy,dz: light ray direction (Cartesian, any scale)
+        """
+        # Convert position
+        r, theta, phi = self.cartesian_to_schwarzschild(x, y, z)
+
+        # Convert direction to spherical momentum
+        p_r, p_theta, p_phi = self.cartesian_to_spherical_momentum(
+                                x, y, z, dx, dy, dz)
+
+        # Solve null condition for p^t
+        p_t = self.null_pt(r, theta, p_r, p_theta, p_phi)
+
+        position = [r, theta, phi]
+        momentum = [p_r, p_theta, p_phi]   # einsteinpy handles p_t internally
+                                            # via the null constraint
+
+        geod = Nulllike(
+            metric="Schwarzschild",
+            metric_params=(),
+            position=position,
+            momentum=momentum,
+            steps=steps,
+            delta=delta,
+            omega=0.0,
+            rtol=1e-9,
+            atol=1e-9,
+            return_cartesian=True,
+            suppress_warnings=True,
+        )
+
+        return geod
+
+    def cartesian_to_schwarzschild(self, x, y, z):
+        """All inputs in M-units"""
+        r = np.sqrt(x ** 2 + y ** 2 + z ** 2)
+        theta = np.arccos(z / r)
+        phi = np.arctan2(y, x)
+        return r, theta, phi
+
+    def cartesian_to_spherical_momentum(self, x, y, z, dx, dy, dz):
+        """
+        (x,y,z)     : position in M-units
+        (dx,dy,dz)  : light direction vector (scale doesn't matter for null geodesics)
+        Returns: p_r, p_theta, p_phi (contravariant, in Schwarzschild coords)
+        """
+        r = np.sqrt(x ** 2 + y ** 2 + z ** 2)
+        rho = np.sqrt(x ** 2 + y ** 2)  # cylindrical radius
+
+        p_r = (x * dx + y * dy + z * dz) / r
+        p_theta = (z * (x * dx + y * dy) - rho ** 2 * dz) / (r ** 2 * rho)
+        p_phi = (x * dy - y * dx) / rho ** 2
+
+        return p_r, p_theta, p_phi
+
+    def null_pt(self, r, theta, p_r, p_theta, p_phi):
+        """Solve g_μν p^μ p^ν = 0 for p^t (Schwarzschild, M=1)"""
+        f = 1 - 2 / r  # lapse factor
+
+        spatial_term = (p_r ** 2 / f
+                        + r ** 2 * p_theta ** 2
+                        + r ** 2 * np.sin(theta) ** 2 * p_phi ** 2)
+
+        p_t = -np.sqrt(spatial_term / f)  # negative → future-directed
+        return p_t
+
+    def test_raytracing(self):
+
+        # 1. Create source mesh
+        sphere = pv.Sphere(radius=3000)
+
+
+        # 2. Define line segment (ray)
+        start = [10, 0.5, 0]
+        stop = [-10, 0.5, 0]
+
+        x = 10.0
+        y = 4
+        z = 0.0
+
+        dx = -10.0
+        dy = 4
+        dz = 0.0
+
+        test_rays = [
+            (200, 0, 0, -200, 4.9, 0, "captured"),
+            (200, 0, 0, -200, 5.2, 0, "near miss - strong bending"),
+            (200, 0, 0, -200, 20.0, 0, "far miss - slight bending"),
+        ]
+
+        for x, y, z, dx, dy, dz, label in test_rays:
+            print(f"\n--- {label} ---")
+            geod = self.calculate_null_geodesic(x, y, z, dx, dy, dz)
+            position, momentum, fate = self.get_trajectory_state_vector(geod, self.central_mass)
+            if position is not None:
+                points = np.column_stack([position[0], position[1], position[2]])
+                self.create_light_ray(points, fate=fate)
+
+        pl = pv.Plotter()
+        pl.add_mesh(sphere, color='w', opacity=0.5, show_edges=True)
+        pl.add_mesh(line, color='blue', line_width=5)
+        pl.show()
+
+    # End of Schwarzschild math
 
     def _as_3d_vector(self, vector):
         # Normalize any 2D/3D input into a 3D vector for rendering math.
@@ -387,62 +499,25 @@ class SchwarzschildSystem:
         self.plotter.add_key_event('bracketright', self.increase_camera_speed)
         self.plotter.add_key_event('bracketleft', self.decrease_camera_speed)
 
-    def _create_body_visual(self, body):
-        # Each planet gets a sphere actor and a polyline mesh for its trail.
-        body_mesh = pv.Sphere(radius=max(body.get_radius() / self.render_scale, 0.02))
-        actor = self.plotter.add_mesh(body_mesh, color=body.get_color(), name=body.get_name())
-        body.assign_body_visuals(actor)
-        self.body_actors[body.get_name()] = actor
-
-        # Start each trail with one point so PyVista has valid geometry immediately.
-        initial_point = np.array([self._render_position(body.get_position())], dtype=float)
-        trail_mesh = pv.PolyData(initial_point)
-        self.plotter.add_mesh(
-            trail_mesh,
-            color=body.get_color(),
-            line_width=2,
-            name=f'{body.get_name()}-trail',
-            render_lines_as_tubes=False,
-        )
-        body.assign_trail_visuals(trail_mesh)
-        self.trail_meshes[body.get_name()] = trail_mesh
-
     def _create_central_visual(self):
-        if not self.requiresCentral:
-            return
-
-        # Render the central body separately from the list of orbiting bodies.
-        central_mesh = pv.Sphere(radius=max(self.central_radius / self.render_scale, 0.03))
-        self.central_actor = self.plotter.add_mesh(central_mesh, color=self.central_color, name='central-body')
-
-    def _setup_labels(self):
-        # Labels are stored in one shared point cloud so they can all be updated together.
-        label_positions = []
-        self.label_names = []
-
-        if self.requiresCentral:
-            label_positions.append(self._render_position([0.0, 0.0, 0.0]))
-            self.label_names.append(self.central_name)
-
-        for body in self.listOfInteractingBodies:
-            label_positions.append(self._render_position(body.get_position()))
-            self.label_names.append(body.get_name())
-
-        self.label_points = pv.PolyData(np.array(label_positions, dtype=float))
-        self.label_points['labels'] = self.label_names
-        self.plotter.add_point_labels(
-            self.label_points,
-            'labels',
-            font_size=14,
-            text_color='white',
-            shape_color='black',
-            shape_opacity=0.35,
-            margin=4,
-            always_visible=True,
-            show_points=False,
+        # central_radius is already the Schwarzschild radius in meters
+        # just convert to render units — no artificial minimum
+        radius_render = self.central_radius / self.render_scale
+        central_mesh = pv.Sphere(radius=radius_render)
+        self.central_actor = self.plotter.add_mesh(
+            central_mesh,
+            color=self.central_color,
+            name='central-body'
         )
 
     def setup_scene(self, plotter=None):
+
+        print(f"1 M-unit = {self.M_in_meters:.1f} meters")
+        print(f"1 M-unit = 1 render unit")
+        print(f"Event horizon at {self.central_radius / self.render_scale:.2f} render units")
+        print(f"Camera at {self.camera_position / self.render_scale} M-units")
+
+
         # Build the PyVista scene once, then reuse the stored actors each frame.
         self.plotter = plotter if plotter is not None else pv.Plotter()
         self.plotter.set_background('black')
@@ -453,29 +528,24 @@ class SchwarzschildSystem:
             font_size=10,
             color='white',
         )
-
-        # Gather names from all bodies in system to display time
-        time_text_setup = 'Observer time (time for us): 0\n'
-        if self.requiresCentral:
-            time_text_setup += f'{self.central_name} time: 0\n'
-        for body in self.listOfInteractingBodies:
-            time_text_setup += f'{body.get_name()} time: 0\n'
-
         self.status_text = self.plotter.add_text('Running', position='upper_right', font_size=10, color='white')
         self.speed_text = self.plotter.add_text('', position='lower_left', font_size=10, color='white')
-        self.time_text = self.plotter.add_text(time_text_setup, position='lower_right', font_size=10, color='white')
-
-        for body in self.listOfInteractingBodies:
-            geod = self.calculate_full_orbit(8, 8, 0, 0, 0, 1)
-
 
         self._create_central_visual()
-        for body in self.listOfInteractingBodies:
-            self._create_body_visual(body)
-            body.append_position_history(body.get_position())
-            body.set_schw
 
-        self._setup_labels()
+        test_rays = [
+            (200, 0, 0, -200, 4.9, 0, "captured"),
+            (200, 0, 0, -200, 5.2, 0, "near miss - strong bending"),
+            (200, 0, 0, -200, 20.0, 0, "far miss - slight bending"),
+        ]
+
+        for x, y, z, dx, dy, dz, label in test_rays:
+            print(f"\n--- {label} ---")
+            geod = self.calculate_null_geodesic(x, y, z, dx, dy, dz)
+            position, momentum, fate = self.get_trajectory_state_vector(geod, self.central_mass)
+            if position is not None:
+                points = np.column_stack([position[0], position[1], position[2]])
+                self.create_light_ray(points, fate=fate)
 
         self.bind_inputs()
         self.initialize_camera()
@@ -483,84 +553,30 @@ class SchwarzschildSystem:
         self.sync_visuals()
         return self.plotter
 
-    def central_body_acceleration_gr(self, position_vector, velocity_vector, mass_val):
-        # Updated to still use Newtonian physics but correct with General Relativity
-        # Only for interactions between massive central bodies and smaller bodies
+    def create_light_ray(self, position_meters, fate="escaped"):
+        FATE_COLORS = {"captured": "red", "escaped": "yellow", "incomplete": "grey"}
 
-        # Constants
-        r = np.linalg.norm(position_vector)
+        # Use first point as the actor's world-space anchor
+        center = position_meters[0]
 
-        # Angular Momentum
-        # l_vec = np.cross(position_vector, velocity_vector)
-        # l2 = np.dot(l_vec, l_vec)
+        # Build mesh relative to that anchor, already in render scale
+        relative_points = (position_meters - center) / self.render_scale
 
-        if r == 0.0:
-            return np.zeros_like(position_vector, dtype=float)
+        if len(relative_points) < 2:
+            return
 
-        # Acceleration using Newtonian
-        a_n = -((self.G * mass_val) / r ** 3) * position_vector
+        light_mesh = pv.Spline(relative_points, n_points=min(1000, len(relative_points)))
+        light_actor = self.plotter.add_mesh(
+            light_mesh,
+            color=FATE_COLORS.get(fate, "white"),
+            line_width=2
+        )
 
-        # GR correction
-        # a_gr = ((3 * self.G * mass_val * l2) / (self.C ** 2 * r ** 5)) * position_vector
-
-        return a_n
-
-    def get_single_body_acceleration(self, pos1, mass_val):
-        # Same calculation as in xyzSystem but this is for interactions between non-central bodies like planets
-        dist = np.linalg.norm(pos1)
-        if dist == 0.0:
-            return np.zeros_like(pos1, dtype=float)
-        ag = -((self.G * mass_val) / dist ** 3) * pos1
-        return ag
-
-    def get_gr_time_dilation_factor(
-            self,
-            body=None,
-            center_pos=np.array([0.0, 0.0, 0.0]),
-            center_velocity=np.array([0.0, 0.0, 0.0]),
-    ):
-        # Gets the local time of the object
-
-        if body is None:
-            velocity_vector = center_velocity
-            self_pos_vector = center_pos
-        else:
-            velocity_vector = body.get_velocity()
-            self_pos_vector = body.get_position()
-
-        phi = 0
-
-        for other in self.listOfInteractingBodies:
-            if other != body:
-                r = np.linalg.norm(self_pos_vector - other.get_position())
-                phi += -(self.G * other.get_mass()) / r
-
-        tau_factor = np.sqrt(1 + ((2 * phi) / self.C ** 2) - (np.linalg.norm(velocity_vector) ** 2 / self.C ** 2))
-        return tau_factor
+        # Store (actor, world-space anchor in meters, fate)
+        self.light_rays.append((light_actor, center, fate))
 
     def update_all(self, _frame=None):
-
-        for body in self.listOfInteractingBodies:
-            body.set_velocity()
-        # Advance all bodies by one simulation timestep.
-        # for body in self.listOfInteractingBodies:
-        #     total_acc = np.zeros_like(body.get_position(), dtype=float)
-        #     if self.requiresCentral:
-        #         total_acc += self.central_body_acceleration_gr(body.get_position(), body.get_velocity(), self.centralMass)
-        #
-        #     # Sum the contribution from every other body in the system.
-        #     for body_to_compare in self.listOfInteractingBodies:
-        #         if body is body_to_compare:
-        #             continue
-        #         total_acc += self.get_single_body_acceleration(
-        #             body.get_position() - body_to_compare.get_position(),
-        #             body_to_compare.get_mass(),
-        #         )
-        #
-        #     body.set_velocity(self.dt * total_acc)
-        #     body.set_position(body.get_velocity() * self.dt)
-        #     body.append_x_history()
-        #     body.append_y_history()
+        pass
 
     def update_camera(self, dt):
         # Apply rotation first so movement uses the latest look direction.
@@ -601,20 +617,6 @@ class SchwarzschildSystem:
         if self.status_text is not None:
             self.status_text.SetText(3, 'Paused' if self.is_paused else 'Running')
 
-    def _update_time_text(self):
-        if self.time_text is not None:
-            try:
-                text_to_show = f'Observer time (time for us): {self.total_time}\n'
-                if self.requiresCentral:
-                    text_to_show += f'{self.central_name} time: {self.total_time * self.central_td_factor}\n'
-                for body in self.listOfInteractingBodies:
-                    text_to_show += f'{body.get_name()} time: {self.total_time * body.get_td_factor()}\n'
-
-                self.time_text.SetText(1, text_to_show)
-            except Exception as e:
-                print("time text update failed:", e)
-
-
     def _format_camera_speed(self):
         # Show camera speed in the most readable unit for the current scale.
         if self.camera_speed >= self.au_in_meters:
@@ -650,84 +652,26 @@ class SchwarzschildSystem:
             self.plotter.render()
 
     def sync_visuals(self):
-        # Push the current simulation state into every render object.
-        label_positions = []
-
         if self.central_actor is not None:
             sun_render_position = self._render_position([0.0, 0.0, 0.0])
             self.central_actor.SetPosition(*sun_render_position)
-            label_positions.append(sun_render_position)
 
-        for body in self.listOfInteractingBodies:
-            render_position = self._render_position(body.get_position())
-            body.set_body_visuals(render_position)
-            if not self.is_paused:
-                body.append_position_history(body.get_position())
-                if len(body.get_position_history()) > self.trail_length:
-                    body.position_history = body.get_position_history()[-self.trail_length:]
-            self._update_trail(body)
-            label_positions.append(render_position)
-
-        if self.label_points is not None:
-            self.label_points.points = np.array(label_positions, dtype=float)
-
-    # def update_frame(self, _caller=None, _event=None):
-    #     # Timer callback: step physics, move camera, sync meshes, then render.
-    #     frame_dt = self.timer_interval / 1000.0
-    #     if not self.is_paused:
-    #         self.update_all()
-    #
-    #     self.update_camera(frame_dt)
-    #     self.sync_visuals()
-    #     self._update_status_text()
-    #     self._update_speed_text()
-    #     if not self.is_paused:
-    #         self.total_time += self.dt
-    #         self._update_time_text()
-    #     self._force_surface_rendering()
-    #     self.plotter.render()
+        # Reposition each light ray relative to current camera position
+        for actor, center, fate in self.light_rays:
+            render_pos = self._render_position(center)
+            actor.SetPosition(*render_pos)
 
     def update_frame(self, _caller=None, _event=None):
         # Timer callback: step physics, move camera, sync meshes, then render.
         frame_dt = self.timer_interval / 1000.0
         if not self.is_paused:
             self.update_all()
-
         self.update_camera(frame_dt)
         self.sync_visuals()
         self._update_status_text()
         self._update_speed_text()
-        if not self.is_paused:
-            self.total_time += self.dt
-            self._update_time_text()
         self._force_surface_rendering()
         self.plotter.render()
-
-    def _update_trail(self, body):
-        # Rebuild the visible polyline from the stored world-space trail history.
-        trail_mesh = body.get_trail_visuals()
-        history = body.get_position_history()
-        if trail_mesh is None:
-            return
-
-        # One point is valid geometry, but it is not yet a visible line.
-        if len(history) < 2:
-            trail_mesh.points = (
-                np.array([self._render_position(point) for point in history], dtype=float)
-                if history
-                else np.empty((0, 3), dtype=float)
-            )
-            trail_mesh.lines = np.empty(0, dtype=np.int64)
-            return
-
-        points = np.array([self._render_position(point) for point in history], dtype=float)
-        cell_count = len(points) - 1
-        line_cells = np.empty(cell_count * 3, dtype=np.int64)
-        line_cells[0::3] = 2
-        line_cells[1::3] = np.arange(0, cell_count, dtype=np.int64)
-        line_cells[2::3] = np.arange(1, len(points), dtype=np.int64)
-        trail_mesh.points = points
-        trail_mesh.lines = line_cells
 
     def run(self):
         # Start the render window and attach the repeating timer loop.

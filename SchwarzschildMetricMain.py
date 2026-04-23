@@ -7,7 +7,8 @@ def main():
 
     system = SchwarzschildMetricSystem.SchwarzschildSystem([],1, 1, 1)
 
-    system.calculate_circular_orbit(8)
+    geod = system.calculate_full_orbit(8, 8, 0, 0, 0, 1)
+    system.plot_orbit_with_mass(geod)
 
 
 if __name__ == '__main__':
