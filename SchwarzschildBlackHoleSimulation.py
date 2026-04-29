@@ -650,10 +650,10 @@ class BlackHoleSimulation:
 
         test_rays = [
             (b_crit * 0.95, "captured"),
-            #(b_crit, "photon sphere"),
-            #(b_crit * 1.05, "escaped"),
+            (b_crit, "photon sphere"),
+            (b_crit * 1.05, "escaped"),
             (b_crit * 2.0, "far escape"),
-            (5.3, "photon sphere 2")
+            #(5.3, "photon sphere 2")
         ]
 
         for b, label in test_rays:
