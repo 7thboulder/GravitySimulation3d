@@ -1,5 +1,6 @@
 import numpy as np
 import pyvista as pv
+from einsteinpy.hypersurface import SchwarzschildEmbedding
 from einsteinpy.plotting import GeodesicPlotter
 from numpy.f2py.auxfuncs import throw_error
 from einsteinpy.metric import Schwarzschild
@@ -7,6 +8,8 @@ from einsteinpy.geodesic import Geodesic, Timelike, Nulllike
 import astropy.units as u
 import matplotlib as mp
 from scipy.integrate import solve_ivp
+from scipy.interpolate import LinearNDInterpolator
+from scipy.integrate import quad
 
 
 class BlackHoleSimulation:
@@ -49,6 +52,11 @@ class BlackHoleSimulation:
         self.ISCO = 6
         self.negligible_bend_distance = 30
         self.light_rays = []
+        self.curve_rays = []
+        self.curvature_top = None
+        self.curvature_top_center = None
+        self.curvature_bottom = None
+        self.curvature_bottom_center = None
 
         # Graphics variables
         self.plotter = None
@@ -382,82 +390,117 @@ class BlackHoleSimulation:
         dy_sq = (b_target ** 2 * r0 ** 2) / (r0 ** 2 - b_target ** 2 * f)
         return np.sqrt(dy_sq)
 
-    def calculate_null_geodesic_fast(self, x, y, z, dx, dy, dz, r_max=1e4, n_points=2000):
-        # CRUCIAL: normalize so momenta are O(1) and solver steps are sensible
-        # Null geodesics are scale-invariant so this never changes the trajectory
+    def calculate_spacetime_curvature(self):
+        rs = 2.0  # Schwarzschild radius
+        r_min = rs + 0.005  # Slight offset to avoid the horizon singularity
+        r_max = 250.0
+
+        # 1. Height function from the spatial metric
+        def get_z(r_val, rs_val):
+            # dz/dr = sqrt(rs / (r - rs))
+            integrand = lambda r: np.sqrt(rs_val / (r - rs_val))
+            z, _ = quad(integrand, rs_val, r_val)
+            return z
+
+        z_vec = np.vectorize(get_z)
+        # 4. Create Mesh
+        r = np.linspace(r_min, r_max, 750)
+        theta = np.linspace(0, 2 * np.pi, 750)
+        R, T = np.meshgrid(r, theta)
+
+        X = R * np.cos(T)
+        Y = R * np.sin(T)
+        Z = z_vec(R, rs)
+
+        return X, Y, Z
+
+    def flamm_height(self, r):
+        """
+        Analytic Flamm paraboloid height for the equatorial spatial slice.
+        Input/output units are M-units.
+        """
+        rs = 2.0
+        r = np.asarray(r, dtype=float)
+        z = np.full_like(r, np.nan, dtype=float)
+        outside = r >= rs
+        z[outside] = 2.0 * np.sqrt(rs * (r[outside] - rs))
+        return z
+
+
+    def calculate_null_geodesic_fast(self, x, y, z, dx, dy, dz, r_max=1e4, n_points=4000):
+        """
+        Uses the Schwarzschild null orbit equation d²u/dφ² = 3u² - u
+        where u = 1/r. Integrates in φ instead of λ — avoids all turning
+        point numerical issues since φ is monotonic along the trajectory.
+        """
+        # Normalize direction — scale invariant for null geodesics
         mag = np.sqrt(dx ** 2 + dy ** 2 + dz ** 2)
         dx, dy, dz = dx / mag, dy / mag, dz / mag
 
-        r, theta, phi = self.cartesian_to_schwarzschild(x, y, z)
-        p_r, p_theta, p_phi = self.cartesian_to_spherical_momentum(x, y, z, dx, dy, dz)
+        r0, theta0, phi0 = self.cartesian_to_schwarzschild(x, y, z)
+        p_r0, p_theta0, p_phi0 = self.cartesian_to_spherical_momentum(x, y, z, dx, dy, dz)
 
-        f0 = 1 - 2 / r
-        E = np.sqrt(f0 ** 2 * p_r ** 2
-                    + f0 * p_theta ** 2 / r ** 2
-                    + f0 * p_phi ** 2 / (r ** 2 * np.sin(theta) ** 2))
+        f0 = 1 - 2 / r0
+        L = p_phi0  # conserved angular momentum
 
-        state0 = [r, theta, phi, p_r, p_theta, p_phi]
+        # Initial u = 1/r and du/dφ
+        u0 = 1.0 / r0
+        # dr/dφ = (dr/dλ)/(dφ/dλ) = (f*p_r) / (L/r²)
+        dr_dphi = f0 * p_r0 * r0 ** 2 / L
+        du0 = -dr_dphi / r0 ** 2  # du/dφ = d(1/r)/dφ = -1/r² * dr/dφ
 
-        def geodesic_odes(lamb, state):
-            r, theta, phi, p_r, p_theta, p_phi = state
-            f = 1 - 2 / r
-            sin_t = np.sin(theta)
-            cos_t = np.cos(theta)
+        print(f"b = L/E = {abs(L):.4f},  b_crit = {3 * np.sqrt(3):.4f}")
+        print(f"u0={u0:.4f}, du0={du0:.6f}")
 
-            dr_dl = f * p_r
-            dtheta_dl = p_theta / r ** 2
-            dphi_dl = p_phi / (r ** 2 * sin_t ** 2)
+        def orbit_odes(phi, state):
+            u, du = state
+            # Schwarzschild null geodesic orbit equation (M=1)
+            d2u = 3 * u ** 2 - u
+            return [du, d2u]
 
-            dp_r_dl = (- E ** 2 / (r ** 2 * f ** 2)
-                       - p_r ** 2 / r ** 2
-                       + p_theta ** 2 / r ** 3
-                       + p_phi ** 2 / (r ** 3 * sin_t ** 2))
-
-            dp_theta_dl = cos_t * p_phi ** 2 / (r ** 2 * sin_t ** 3)
-            dp_phi_dl = 0.0
-
-            return [dr_dl, dtheta_dl, dphi_dl, dp_r_dl, dp_theta_dl, dp_phi_dl]
-
-        def event_captured(lamb, state):
-            return state[0] - 2.0
+        # Stop when ray hits event horizon (u = 1/2, r = 2)
+        def event_captured(phi, state):
+            return state[0] - 0.5
 
         event_captured.terminal = True
-        event_captured.direction = -1
+        event_captured.direction = 1  # u increasing = r decreasing
 
-        def event_escaped(lamb, state):
-            return state[0] - r_max
+        # Stop when ray escapes to r_max
+        def event_escaped(phi, state):
+            return state[0] - 1.0 / r_max
 
         event_escaped.terminal = True
-        event_escaped.direction = 1
+        event_escaped.direction = -1  # u decreasing = r increasing
 
         sol = solve_ivp(
-            geodesic_odes,
-            t_span=(0, r * 500),
-            y0=state0,
+            orbit_odes,
+            t_span=(phi0, phi0 + 20 * np.pi),  # allow up to 10 full orbits for photon sphere grazing
+            y0=[u0, du0],
             method='DOP853',
             events=[event_captured, event_escaped],
-            rtol=1e-10,
-            atol=1e-10,
+            rtol=1e-12,
+            atol=1e-12,
             dense_output=True,
-            max_step=1.0,  # 1 M-unit max — fine enough to resolve r=3 photon sphere
         )
 
-        lambda_end = sol.t[-1]
-        lambdas = np.linspace(0, lambda_end, n_points)
-        y_dense = sol.sol(lambdas)
+        # Resample at even φ intervals
+        phi_end = sol.t[-1]
+        phis = np.linspace(phi0, phi_end, n_points)
+        y_dense = sol.sol(phis)
 
-        r_arr = y_dense[0]
-        theta_arr = y_dense[1]
-        phi_arr = y_dense[2]
+        u_arr = y_dense[0]
 
-        outside = r_arr > 2.0
-        r_arr = r_arr[outside]
-        theta_arr = theta_arr[outside]
-        phi_arr = phi_arr[outside]
+        # Trim any points inside event horizon
+        outside = u_arr < 0.5
+        u_arr = u_arr[outside]
+        phis = phis[outside]
 
-        x_arr = r_arr * np.sin(theta_arr) * np.cos(phi_arr)
-        y_arr = r_arr * np.sin(theta_arr) * np.sin(phi_arr)
-        z_arr = r_arr * np.cos(theta_arr)
+        r_arr = 1.0 / u_arr
+
+        # Convert to Cartesian — orbit stays in z=0 plane for equatorial rays
+        x_arr = r_arr * np.cos(phis)
+        y_arr = r_arr * np.sin(phis)
+        z_arr = np.zeros_like(r_arr)
 
         if sol.t_events[0].size > 0:
             fate = "captured"
@@ -466,7 +509,7 @@ class BlackHoleSimulation:
         else:
             fate = "incomplete"
 
-        print(f"Fate: {fate}, r_min: {r_arr.min():.3f}, steps: {len(sol.t)}")
+        print(f"Fate: {fate}, r_min: {r_arr.min():.4f}, steps: {len(sol.t)}")
 
         return np.array([x_arr, y_arr, z_arr]), fate
 
@@ -596,23 +639,29 @@ class BlackHoleSimulation:
 
         self._create_central_visual()
 
+        x, y, z = self.calculate_spacetime_curvature()
+        self.create_curvature(x,y,z)
+
         b_crit = 3 * np.sqrt(3)
-        r0 = 50
+        r0 = 1000
+
 
         COLORS = {"captured": "red", "escaped": "yellow", "incomplete": "grey"}
 
         test_rays = [
             (b_crit * 0.95, "captured"),
-            (b_crit, "photon sphere"),
-            (b_crit * 1.05, "escaped"),
+            #(b_crit, "photon sphere"),
+            #(b_crit * 1.05, "escaped"),
             (b_crit * 2.0, "far escape"),
+            (5.3, "photon sphere 2")
         ]
 
         for b, label in test_rays:
             dy = self.impact_param_to_dy(r0, b)
             position, fate = self.calculate_null_geodesic_fast(r0, 0, 0, -r0, dy, 0)
-            position = position.T
-            self.create_light_ray(position, fate)
+            position_meters = position.T * self.M_in_meters
+            #self.create_light_ray(position_meters, fate)
+            self.create_embedded_light_ray(position_meters, fate)
 
         self.bind_inputs()
         self.initialize_camera()
@@ -620,19 +669,35 @@ class BlackHoleSimulation:
         self.sync_visuals()
         return self.plotter
 
+    def create_curvature(self, x, y, z):
+
+        curve_mesh_top = pv.StructuredGrid(x, y, z)
+        #curve_mesh_bottom = pv.StructuredGrid(x, y, -z)
+
+        top_curve_actor = self.plotter.add_mesh(curve_mesh_top, cmap="Blues", scalars=z, show_scalar_bar=False, style='wireframe')
+        #bottom_curve_actor = self.plotter.add_mesh(curve_mesh_bottom, cmap="Blues_r", scalars=-z, show_scalar_bar=False, style='wireframe')
+
+        self.curvature_top = top_curve_actor
+        #self.curvature_bottom = bottom_curve_actor
+        self.curvature_top_center = [0.0,0.0,0.0]
+
     def create_light_ray(self, position_meters, fate="escaped"):
         FATE_COLORS = {"captured": "red", "escaped": "yellow", "incomplete": "grey"}
 
         # Use first point as the actor's world-space anchor
         center = position_meters[0]
 
-        # Build mesh relative to that anchor, already in render scale
-        relative_points = position_meters - center
+
+        # Build the line in local render coordinates so floating-origin
+        # camera shifts only move the actor, not distort the sampled path.
+        relative_points = (position_meters - center) / self.render_scale
 
         if len(relative_points) < 2:
             return
 
-        light_mesh = pv.Spline(position_meters, n_points=min(1000, len(position_meters)))
+        # Use the sampled geodesic points directly; spline fitting can overshoot
+        # near a tight periapsis and fake a path through the event horizon.
+        light_mesh = pv.lines_from_points(relative_points, close=False)
         light_actor = self.plotter.add_mesh(
             light_mesh,
             color=FATE_COLORS.get(fate, "white"),
@@ -641,6 +706,46 @@ class BlackHoleSimulation:
 
         # Store (actor, world-space anchor in meters, fate)
         self.light_rays.append((light_actor, center, fate))
+
+    def create_embedded_light_ray(self, position_meters, fate="escaped"):
+        FATE_COLORS = {"captured": "red", "escaped": "yellow", "incomplete": "grey"}
+
+        points_M = position_meters / self.M_in_meters
+        x = points_M[:, 0]
+        y = points_M[:, 1]
+        z = points_M[:, 2]
+
+        r = np.sqrt(x ** 2 + y ** 2 + z ** 2)
+        phi = np.arctan2(y, x)
+        z_embed = self.flamm_height(r)
+
+        valid = np.isfinite(z_embed)
+        if np.count_nonzero(valid) < 2:
+            return
+
+        embedded_points_meters = np.column_stack(
+            [
+                r[valid] * np.cos(phi[valid]),
+                r[valid] * np.sin(phi[valid]),
+                z_embed[valid],
+            ]
+        ) * self.M_in_meters
+
+        center = embedded_points_meters[0]
+        relative_points = (embedded_points_meters - center) / self.render_scale
+
+        if len(relative_points) < 2:
+            return
+
+        light_mesh = pv.lines_from_points(relative_points, close=False)
+        light_actor = self.plotter.add_mesh(
+            light_mesh,
+            color=FATE_COLORS.get(fate, "white"),
+            line_width=2
+        )
+
+        self.light_rays.append((light_actor, center, fate))
+
 
     def update_all(self, _frame=None):
         pass
@@ -679,6 +784,10 @@ class BlackHoleSimulation:
 
         for actor in actors:
             actor.GetProperty().SetRepresentationToSurface()
+
+        for actor in (self.curvature_top, self.curvature_bottom):
+            if actor is not None:
+                actor.GetProperty().SetRepresentationToWireframe()
 
     def _update_status_text(self):
         if self.status_text is not None:
@@ -727,6 +836,14 @@ class BlackHoleSimulation:
         for actor, center, fate in self.light_rays:
             render_pos = self._render_position(center)
             actor.SetPosition(*render_pos)
+
+        for actor, center, fate in self.curve_rays:
+            render_pos = self._render_position(center)
+            actor.SetPosition(*render_pos)
+
+        render_pos = self._render_position([0.0, 0.0, 0.0])
+        self.curvature_top.SetPosition(*render_pos)
+        #self.curvature_bottom.SetPosition(*render_pos)
 
     def update_frame(self, _caller=None, _event=None):
         # Timer callback: step physics, move camera, sync meshes, then render.
