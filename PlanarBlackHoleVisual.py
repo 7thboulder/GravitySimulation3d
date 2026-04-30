@@ -1,11 +1,15 @@
 import numpy as np
 import matplotlib.pyplot as plt
 from scipy.integrate import solve_ivp
+from multiprocessing import Pool
 
 
 WIDTH = 320
 HEIGHT = 180
 FOV_DEG = 45.0
+SAMPLES_PER_AXIS = 2
+USE_MULTIPROCESSING = True
+MAX_PROCESSES = 4
 
 CAMERA_POS = np.array([0.0, -32.0, -3.0], dtype=float)
 CAMERA_TARGET = np.array([0.0, 0.0, 0.0], dtype=float)
@@ -17,6 +21,9 @@ R_ESCAPE = 180.0
 
 PHI_MAX = 24.0 * np.pi
 N_SAMPLES = 3000
+WORKER_FORWARD = None
+WORKER_RIGHT = None
+WORKER_UP = None
 
 
 def make_camera_basis(pos, target):
@@ -41,6 +48,18 @@ def pixel_to_ray(i, j, width, height, fov_deg, forward, right, up):
 
     x = (2.0 * ((i + 0.5) / width) - 1.0) * np.tan(fov / 2.0) * aspect
     y = (1.0 - 2.0 * ((j + 0.5) / height)) * np.tan(fov / 2.0)
+
+    direction = forward + x * right + y * up
+    direction /= np.linalg.norm(direction)
+    return direction
+
+
+def subpixel_to_ray(i, j, sx, sy, width, height, fov_deg, forward, right, up):
+    fov = np.radians(fov_deg)
+    aspect = width / height
+
+    x = (2.0 * ((i + sx) / width) - 1.0) * np.tan(fov / 2.0) * aspect
+    y = (1.0 - 2.0 * ((j + sy) / height)) * np.tan(fov / 2.0)
 
     direction = forward + x * right + y * up
     direction /= np.linalg.norm(direction)
@@ -173,23 +192,46 @@ def disk_color(hit_point):
     r = np.linalg.norm(hit_point)
     t = np.clip((r - R_DISK_IN) / (R_DISK_OUT - R_DISK_IN), 0.0, 1.0)
 
-    inner = np.array([1.0, 0.96, 0.85], dtype=float)
-    outer = np.array([1.0, 0.38, 0.08], dtype=float)
-    color = (1.0 - t) * inner + t * outer
+    inner = np.array([1.0, 0.985, 0.93], dtype=float)
+    mid = np.array([1.0, 0.58, 0.18], dtype=float)
+    outer = np.array([0.72, 0.13, 0.02], dtype=float)
+    if t < 0.45:
+        blend = t / 0.45
+        color = (1.0 - blend) * inner + blend * mid
+    else:
+        blend = (t - 0.45) / 0.55
+        color = (1.0 - blend) * mid + blend * outer
 
-    brightness = 2.2 / (r ** 0.8)
-    return np.clip(color * brightness, 0.0, 1.0)
+    brightness = 4.0 / (r ** 0.92)
+    glow = 0.18 / max(r - R_HORIZON, 0.35)
+    return np.clip(color * (brightness + glow), 0.0, 4.0)
 
 
 def background_color(direction):
     u = 0.5 * (direction[2] + 1.0)
-    base = (1.0 - u) * np.array([0.01, 0.01, 0.02]) + u * np.array([0.06, 0.05, 0.04])
+    horizon = np.array([0.11, 0.075, 0.055], dtype=float)
+    zenith = np.array([0.01, 0.01, 0.02], dtype=float)
+    base = (1.0 - u) * horizon + u * zenith
 
     theta = np.arccos(np.clip(direction[2], -1.0, 1.0))
     phi = np.arctan2(direction[1], direction[0])
-    seed = np.sin(43758.5453 * (phi + 0.5 * theta))
-    star = 1.0 if seed > 0.9994 else 0.0
-    return np.clip(base + star * np.array([1.0, 0.95, 0.85]), 0.0, 1.0)
+    a = np.sin(1234.567 * phi + 321.123 * theta)
+    b = np.sin(6789.123 * phi - 987.654 * theta)
+    c = np.sin(4567.891 * (phi + theta))
+
+    star_field = (a + b + c) / 3.0
+    star_core = 1.0 if star_field > 0.9965 else 0.0
+    star_halo = 1.0 if star_field > 0.992 else 0.0
+
+    color = base
+    color += star_halo * np.array([0.14, 0.15, 0.18], dtype=float)
+    color += star_core * np.array([1.4, 1.3, 1.15], dtype=float)
+    return np.clip(color, 0.0, 3.0)
+
+
+def tone_map(color):
+    mapped = color / (1.0 + color)
+    return np.power(np.clip(mapped, 0.0, 1.0), 1.0 / 2.2)
 
 
 def trace_ray(ray_origin, ray_dir):
@@ -214,15 +256,51 @@ def trace_ray(ray_origin, ray_dir):
     return background_color(final_dir / norm)
 
 
+def init_worker(forward, right, up):
+    global WORKER_FORWARD, WORKER_RIGHT, WORKER_UP
+    WORKER_FORWARD = np.array(forward, dtype=float)
+    WORKER_RIGHT = np.array(right, dtype=float)
+    WORKER_UP = np.array(up, dtype=float)
+
+
+def render_row(j):
+    row = np.zeros((WIDTH, 3), dtype=float)
+    offsets = np.linspace(0.25, 0.75, SAMPLES_PER_AXIS)
+
+    for i in range(WIDTH):
+        color = np.zeros(3, dtype=float)
+        for sy in offsets:
+            for sx in offsets:
+                ray_dir = subpixel_to_ray(i, j, sx, sy, WIDTH, HEIGHT, FOV_DEG, WORKER_FORWARD, WORKER_RIGHT, WORKER_UP)
+                color += trace_ray(CAMERA_POS, ray_dir)
+        row[i] = tone_map(color / (SAMPLES_PER_AXIS ** 2))
+
+    return j, row
+
+
 def render():
     image = np.zeros((HEIGHT, WIDTH, 3), dtype=float)
     forward, right, up = make_camera_basis(CAMERA_POS, CAMERA_TARGET)
 
-    for j in range(HEIGHT):
-        print(f"row {j + 1}/{HEIGHT}")
-        for i in range(WIDTH):
-            ray_dir = pixel_to_ray(i, j, WIDTH, HEIGHT, FOV_DEG, forward, right, up)
-            image[j, i] = trace_ray(CAMERA_POS, ray_dir)
+    if USE_MULTIPROCESSING:
+        print(f"multiprocessing enabled with {MAX_PROCESSES} workers")
+        with Pool(
+            processes=MAX_PROCESSES,
+            initializer=init_worker,
+            initargs=(forward, right, up),
+        ) as pool:
+            for completed_rows, (j, row) in enumerate(
+                pool.imap_unordered(render_row, range(HEIGHT)),
+                start=1,
+            ):
+                image[j] = row
+                print(f"row {completed_rows}/{HEIGHT} complete")
+    else:
+        init_worker(forward, right, up)
+        for j in range(HEIGHT):
+            print(f"row {j + 1}/{HEIGHT}")
+            _, row = render_row(j)
+            image[j] = row
 
     return image
 
