@@ -1,6 +1,7 @@
 import numpy as np
 import matplotlib.pyplot as plt
 from scipy.integrate import solve_ivp
+from scipy.ndimage import gaussian_filter
 from multiprocessing import Pool
 from pathlib import Path
 from PIL import Image
@@ -12,6 +13,9 @@ FOV_DEG = 45.0
 SAMPLES_PER_AXIS = 2
 USE_MULTIPROCESSING = True
 MAX_PROCESSES = 12
+BLOOM_THRESHOLD = 0.62
+BLOOM_SIGMA = 2.2
+BLOOM_STRENGTH = 0.65
 
 #CAMERA_POS = np.array([0.0, 2.5, 2.5], dtype=float)
 CAMERA_POS = np.array([0.0, -32.0, 3.0], dtype=float)
@@ -335,6 +339,18 @@ def tone_map(color):
     return np.power(np.clip(mapped, 0.0, 1.0), 1.0 / 2.2)
 
 
+def apply_bloom(image):
+    luminance = 0.2126 * image[:, :, 0] + 0.7152 * image[:, :, 1] + 0.0722 * image[:, :, 2]
+    bright_mask = np.clip(luminance - BLOOM_THRESHOLD, 0.0, None)
+    bright_pass = image * bright_mask[:, :, None]
+
+    blurred = np.zeros_like(image)
+    for channel in range(3):
+        blurred[:, :, channel] = gaussian_filter(bright_pass[:, :, channel], sigma=BLOOM_SIGMA)
+
+    return np.clip(image + BLOOM_STRENGTH * blurred, 0.0, 1.0)
+
+
 def load_background_image():
     global BACKGROUND_IMAGE
 
@@ -431,6 +447,7 @@ def render():
 
 def main():
     image = render()
+    image = apply_bloom(image)
 
     plt.figure(figsize=(12, 7))
     plt.imshow(image, origin="lower")
