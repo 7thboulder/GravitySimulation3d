@@ -5,15 +5,16 @@ from multiprocessing import Pool
 from pathlib import Path
 
 
-WIDTH = 320
-HEIGHT = 180
+WIDTH = 800
+HEIGHT = 640
 FOV_DEG = 45.0
 SAMPLES_PER_AXIS = 2
 USE_MULTIPROCESSING = True
-MAX_PROCESSES = 4
+MAX_PROCESSES = 12
 
-CAMERA_POS = np.array([0.0, -32.0, -3.0], dtype=float)
-CAMERA_TARGET = np.array([0.0, 0.0, 0.0], dtype=float)
+#CAMERA_POS = np.array([0.0, 2.5, 2.5], dtype=float)
+CAMERA_POS = np.array([0.0, -32.0, 3.0], dtype=float)
+CAMERA_TARGET = np.array([0.0, 0.0, 3], dtype=float)
 
 R_HORIZON = 2.0
 R_DISK_IN = 6.0
