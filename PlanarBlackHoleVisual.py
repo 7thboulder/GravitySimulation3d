@@ -188,7 +188,20 @@ def segment_disk_intersection(p0, p1):
     return None
 
 
-def disk_color(hit_point):
+def disk_tangent_velocity(hit_point):
+    x, y, _ = hit_point
+    rho = np.hypot(x, y)
+    if rho < 1e-12:
+        return np.zeros(3, dtype=float)
+
+    tangent = np.array([-y / rho, x / rho, 0.0], dtype=float)
+
+    # Approximate relativistic disk speed profile in geometric units.
+    beta = np.sqrt(np.clip(1.0 / max(rho - 2.0, 1e-6), 0.0, 0.45))
+    return beta * tangent
+
+
+def disk_color(hit_point, outgoing_dir):
     r = np.linalg.norm(hit_point)
     t = np.clip((r - R_DISK_IN) / (R_DISK_OUT - R_DISK_IN), 0.0, 1.0)
 
@@ -204,13 +217,35 @@ def disk_color(hit_point):
 
     brightness = 4.0 / (r ** 0.92)
     glow = 0.18 / max(r - R_HORIZON, 0.35)
-    return np.clip(color * (brightness + glow), 0.0, 4.0)
+
+    velocity = disk_tangent_velocity(hit_point)
+    beta = np.linalg.norm(velocity)
+    if beta > 1e-8:
+        view_cos = np.clip(np.dot(velocity / beta, -outgoing_dir), -1.0, 1.0)
+    else:
+        view_cos = 0.0
+
+    gamma = 1.0 / np.sqrt(max(1.0 - beta ** 2, 1e-6))
+    doppler = 1.0 / (gamma * max(1.0 - beta * view_cos, 1e-6))
+    grav_shift = np.sqrt(max(1.0 - 2.0 / max(r, R_HORIZON + 1e-6), 1e-6))
+
+    intensity_boost = doppler ** 3
+    net_shift = doppler * grav_shift
+
+    if net_shift >= 1.0:
+        shift_strength = min(net_shift - 1.0, 0.5)
+        color = (1.0 - shift_strength) * color + shift_strength * np.array([1.0, 0.97, 0.9], dtype=float)
+    else:
+        shift_strength = min(1.0 - net_shift, 0.7)
+        color = (1.0 - shift_strength) * color + shift_strength * np.array([0.75, 0.16, 0.03], dtype=float)
+
+    return np.clip(color * (brightness + glow) * intensity_boost, 0.0, 6.0)
 
 
 def background_color(direction):
     u = 0.5 * (direction[2] + 1.0)
-    horizon = np.array([0.11, 0.075, 0.055], dtype=float)
-    zenith = np.array([0.01, 0.01, 0.02], dtype=float)
+    horizon = np.array([0.028, 0.018, 0.014], dtype=float)
+    zenith = np.array([0.002, 0.003, 0.008], dtype=float)
     base = (1.0 - u) * horizon + u * zenith
 
     theta = np.arccos(np.clip(direction[2], -1.0, 1.0))
@@ -224,9 +259,9 @@ def background_color(direction):
     star_halo = 1.0 if star_field > 0.992 else 0.0
 
     color = base
-    color += star_halo * np.array([0.14, 0.15, 0.18], dtype=float)
-    color += star_core * np.array([1.4, 1.3, 1.15], dtype=float)
-    return np.clip(color, 0.0, 3.0)
+    color += star_halo * np.array([0.08, 0.09, 0.11], dtype=float)
+    color += star_core * np.array([1.2, 1.12, 1.0], dtype=float)
+    return np.clip(color, 0.0, 2.5)
 
 
 def tone_map(color):
@@ -243,7 +278,10 @@ def trace_ray(ray_origin, ray_dir):
     for i in range(len(positions) - 1):
         hit = segment_disk_intersection(positions[i], positions[i + 1])
         if hit is not None:
-            return disk_color(hit)
+            segment_dir = positions[i + 1] - positions[i]
+            norm = np.linalg.norm(segment_dir)
+            outgoing_dir = ray_dir if norm < 1e-12 else segment_dir / norm
+            return disk_color(hit, outgoing_dir)
 
     if fate == "captured":
         return np.zeros(3, dtype=float)
