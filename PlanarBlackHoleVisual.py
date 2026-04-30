@@ -20,6 +20,7 @@ CAMERA_TARGET = np.array([0.0, 0.0, 3], dtype=float)
 R_HORIZON = 2.0
 R_DISK_IN = 6.0
 R_DISK_OUT = 16.0
+DISK_HALF_THICKNESS = 0.35
 R_ESCAPE = 180.0
 BACKGROUND_IMAGE_PATH = Path("space_background.png")
 
@@ -172,25 +173,29 @@ def trace_planar_geodesic(ray_origin, ray_dir):
 
 
 def segment_disk_intersection(p0, p1):
-    z0 = p0[2]
-    z1 = p1[2]
+    hits = []
+    z_planes = (DISK_HALF_THICKNESS, -DISK_HALF_THICKNESS)
+    dz = p1[2] - p0[2]
 
-    if z0 == 0.0:
-        hit = p0
-    elif z1 == 0.0:
-        hit = p1
-    elif z0 * z1 > 0.0:
-        return None
-    else:
-        t = -z0 / (z1 - z0)
+    for z_plane in z_planes:
+        if abs(dz) < 1e-12:
+            continue
+
+        t = (z_plane - p0[2]) / dz
         if t < 0.0 or t > 1.0:
-            return None
-        hit = p0 + t * (p1 - p0)
+            continue
 
-    r_hit = np.linalg.norm(hit)
-    if R_DISK_IN <= r_hit <= R_DISK_OUT:
-        return hit
-    return None
+        hit = p0 + t * (p1 - p0)
+        rho = np.hypot(hit[0], hit[1])
+        if R_DISK_IN <= rho <= R_DISK_OUT:
+            hits.append((t, hit, z_plane))
+
+    if not hits:
+        return None
+
+    _, hit, z_plane = min(hits, key=lambda item: item[0])
+    surface = "top" if z_plane > 0.0 else "bottom"
+    return hit, surface
 
 
 def disk_tangent_velocity(hit_point):
@@ -206,9 +211,9 @@ def disk_tangent_velocity(hit_point):
     return beta * tangent
 
 
-def disk_color(hit_point, outgoing_dir):
-    r = np.linalg.norm(hit_point)
-    t = np.clip((r - R_DISK_IN) / (R_DISK_OUT - R_DISK_IN), 0.0, 1.0)
+def disk_color(hit_point, outgoing_dir, surface):
+    rho = np.hypot(hit_point[0], hit_point[1])
+    t = np.clip((rho - R_DISK_IN) / (R_DISK_OUT - R_DISK_IN), 0.0, 1.0)
 
     inner = np.array([1.0, 0.985, 0.93], dtype=float)
     mid = np.array([1.0, 0.58, 0.18], dtype=float)
@@ -220,8 +225,8 @@ def disk_color(hit_point, outgoing_dir):
         blend = (t - 0.45) / 0.55
         color = (1.0 - blend) * mid + blend * outer
 
-    brightness = 4.0 / (r ** 0.92)
-    glow = 0.18 / max(r - R_HORIZON, 0.35)
+    brightness = 4.0 / (rho ** 0.92)
+    glow = 0.18 / max(rho - R_HORIZON, 0.35)
 
     velocity = disk_tangent_velocity(hit_point)
     beta = np.linalg.norm(velocity)
@@ -244,7 +249,9 @@ def disk_color(hit_point, outgoing_dir):
         shift_strength = min(1.0 - net_shift, 0.7)
         color = (1.0 - shift_strength) * color + shift_strength * np.array([0.75, 0.16, 0.03], dtype=float)
 
-    return np.clip(color * (brightness + glow) * intensity_boost, 0.0, 6.0)
+    # Slightly favor the upper surface and dim the underside.
+    surface_factor = 1.06 if surface == "top" else 0.82
+    return np.clip(color * (brightness + glow) * intensity_boost * surface_factor, 0.0, 6.0)
 
 
 def background_color(direction):
@@ -352,12 +359,13 @@ def trace_ray(ray_origin, ray_dir):
         return np.zeros(3, dtype=float) if fate == "captured" else background_color(ray_dir)
 
     for i in range(len(positions) - 1):
-        hit = segment_disk_intersection(positions[i], positions[i + 1])
-        if hit is not None:
+        disk_hit = segment_disk_intersection(positions[i], positions[i + 1])
+        if disk_hit is not None:
+            hit, surface = disk_hit
             segment_dir = positions[i + 1] - positions[i]
             norm = np.linalg.norm(segment_dir)
             outgoing_dir = ray_dir if norm < 1e-12 else segment_dir / norm
-            return disk_color(hit, outgoing_dir)
+            return disk_color(hit, outgoing_dir, surface)
 
     if fate == "captured":
         return np.zeros(3, dtype=float)
