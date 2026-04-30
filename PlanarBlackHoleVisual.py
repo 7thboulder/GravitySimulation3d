@@ -2,6 +2,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 from scipy.integrate import solve_ivp
 from multiprocessing import Pool
+from pathlib import Path
 
 
 WIDTH = 320
@@ -18,12 +19,14 @@ R_HORIZON = 2.0
 R_DISK_IN = 6.0
 R_DISK_OUT = 16.0
 R_ESCAPE = 180.0
+BACKGROUND_IMAGE_PATH = Path("space_background.png")
 
 PHI_MAX = 24.0 * np.pi
 N_SAMPLES = 3000
 WORKER_FORWARD = None
 WORKER_RIGHT = None
 WORKER_UP = None
+BACKGROUND_IMAGE = None
 
 
 def make_camera_basis(pos, target):
@@ -243,30 +246,103 @@ def disk_color(hit_point, outgoing_dir):
 
 
 def background_color(direction):
+    if BACKGROUND_IMAGE is not None:
+        return sample_background_image(direction)
+
+    return procedural_background_color(direction)
+
+
+def sample_background_image(direction):
+    phi = np.arctan2(direction[1], direction[0])
+    theta = np.arccos(np.clip(direction[2], -1.0, 1.0))
+
+    u = (phi / (2.0 * np.pi) + 0.5) % 1.0
+    v = np.clip(theta / np.pi, 0.0, 1.0)
+
+    h, w = BACKGROUND_IMAGE.shape[:2]
+    x = u * (w - 1)
+    y = v * (h - 1)
+
+    x0 = int(np.floor(x))
+    y0 = int(np.floor(y))
+    x1 = min(x0 + 1, w - 1)
+    y1 = min(y0 + 1, h - 1)
+
+    tx = x - x0
+    ty = y - y0
+
+    c00 = BACKGROUND_IMAGE[y0, x0]
+    c10 = BACKGROUND_IMAGE[y0, x1]
+    c01 = BACKGROUND_IMAGE[y1, x0]
+    c11 = BACKGROUND_IMAGE[y1, x1]
+
+    c0 = (1.0 - tx) * c00 + tx * c10
+    c1 = (1.0 - tx) * c01 + tx * c11
+    return np.clip((1.0 - ty) * c0 + ty * c1, 0.0, 3.5)
+
+
+def procedural_background_color(direction):
     u = 0.5 * (direction[2] + 1.0)
-    horizon = np.array([0.028, 0.018, 0.014], dtype=float)
-    zenith = np.array([0.002, 0.003, 0.008], dtype=float)
+    horizon = np.array([0.006, 0.004, 0.005], dtype=float)
+    zenith = np.array([0.0006, 0.0009, 0.0025], dtype=float)
     base = (1.0 - u) * horizon + u * zenith
 
     theta = np.arccos(np.clip(direction[2], -1.0, 1.0))
     phi = np.arctan2(direction[1], direction[0])
+
+    # Bright galactic band to make lensing distortions easier to see.
+    band_phase = phi + 0.35 * np.sin(2.0 * theta)
+    band_width = np.exp(-((theta - (np.pi * 0.52 + 0.12 * np.sin(1.7 * band_phase))) / 0.12) ** 2)
+    band_texture = (
+        0.55
+        + 0.25 * np.sin(18.0 * phi)
+        + 0.18 * np.sin(47.0 * phi + 3.0 * theta)
+        + 0.12 * np.sin(95.0 * phi - 11.0 * theta)
+    )
+    band_texture = np.clip(band_texture, 0.0, 1.2)
+    galactic_band = band_width * band_texture
+
     a = np.sin(1234.567 * phi + 321.123 * theta)
     b = np.sin(6789.123 * phi - 987.654 * theta)
     c = np.sin(4567.891 * (phi + theta))
+    d = np.sin(15317.337 * phi + 2211.731 * theta)
+    e = np.sin(31111.113 * phi - 7133.219 * theta)
 
-    star_field = (a + b + c) / 3.0
-    star_core = 1.0 if star_field > 0.9965 else 0.0
-    star_halo = 1.0 if star_field > 0.992 else 0.0
+    star_field = (a + b + c + d + e) / 5.0
+    star_core = 1.0 if star_field > 0.998 else 0.0
+    star_halo = 1.0 if star_field > 0.994 else 0.0
+    star_mid = 1.0 if star_field > 0.989 else 0.0
 
     color = base
-    color += star_halo * np.array([0.08, 0.09, 0.11], dtype=float)
-    color += star_core * np.array([1.2, 1.12, 1.0], dtype=float)
-    return np.clip(color, 0.0, 2.5)
+    color += galactic_band * np.array([0.13, 0.12, 0.10], dtype=float)
+    color += star_mid * np.array([0.015, 0.016, 0.02], dtype=float)
+    color += star_halo * np.array([0.12, 0.13, 0.16], dtype=float)
+    color += star_core * np.array([1.6, 1.5, 1.35], dtype=float)
+    return np.clip(color, 0.0, 3.5)
 
 
 def tone_map(color):
     mapped = color / (1.0 + color)
     return np.power(np.clip(mapped, 0.0, 1.0), 1.0 / 2.2)
+
+
+def load_background_image():
+    global BACKGROUND_IMAGE
+
+    if not BACKGROUND_IMAGE_PATH.exists():
+        BACKGROUND_IMAGE = None
+        return
+
+    image = plt.imread(BACKGROUND_IMAGE_PATH)
+    if image.ndim != 3:
+        BACKGROUND_IMAGE = None
+        return
+
+    image = image[..., :3].astype(float)
+    if image.max() > 1.0:
+        image /= 255.0
+
+    BACKGROUND_IMAGE = image
 
 
 def trace_ray(ray_origin, ray_dir):
@@ -299,6 +375,7 @@ def init_worker(forward, right, up):
     WORKER_FORWARD = np.array(forward, dtype=float)
     WORKER_RIGHT = np.array(right, dtype=float)
     WORKER_UP = np.array(up, dtype=float)
+    load_background_image()
 
 
 def render_row(j):
@@ -319,6 +396,7 @@ def render_row(j):
 def render():
     image = np.zeros((HEIGHT, WIDTH, 3), dtype=float)
     forward, right, up = make_camera_basis(CAMERA_POS, CAMERA_TARGET)
+    load_background_image()
 
     if USE_MULTIPROCESSING:
         print(f"multiprocessing enabled with {MAX_PROCESSES} workers")
