@@ -3,6 +3,7 @@ import matplotlib.pyplot as plt
 from scipy.integrate import solve_ivp
 from multiprocessing import Pool
 from pathlib import Path
+from PIL import Image
 
 
 WIDTH = 800
@@ -334,14 +335,12 @@ def load_background_image():
         BACKGROUND_IMAGE = None
         return
 
-    image = plt.imread(BACKGROUND_IMAGE_PATH)
+    image = np.asarray(Image.open(BACKGROUND_IMAGE_PATH).convert("RGB"), dtype=float)
     if image.ndim != 3:
         BACKGROUND_IMAGE = None
         return
 
-    image = image[..., :3].astype(float)
-    if image.max() > 1.0:
-        image /= 255.0
+    image /= 255.0
 
     BACKGROUND_IMAGE = image
 
