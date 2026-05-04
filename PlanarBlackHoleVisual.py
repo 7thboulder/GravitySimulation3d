@@ -19,7 +19,7 @@ BLOOM_STRENGTH = 0.65
 
 #CAMERA_POS = np.array([0.0, 2.5, 2.5], dtype=float)
 CAMERA_POS = np.array([0.0, -32.0, 3.0], dtype=float)
-CAMERA_TARGET = np.array([0.0, 0.0, 3], dtype=float)
+CAMERA_TARGET = np.array([0.0, 0.0, 0.0], dtype=float)
 
 R_HORIZON = 2.0
 R_DISK_IN = 6.0
@@ -175,30 +175,32 @@ def trace_planar_geodesic(ray_origin, ray_dir):
 
     return positions, fate
 
-
+# Fixed intersection code so that the disk shows up with a thickness instead of two planes
 def segment_disk_intersection(p0, p1):
-    hits = []
-    z_planes = (DISK_HALF_THICKNESS, -DISK_HALF_THICKNESS)
     dz = p1[2] - p0[2]
 
-    for z_plane in z_planes:
-        if abs(dz) < 1e-12:
-            continue
+    # Find the t-interval where the segment is inside the z-slab
+    if abs(dz) > 1e-12:
+        t_top = (DISK_HALF_THICKNESS - p0[2]) / dz
+        t_bot = (-DISK_HALF_THICKNESS - p0[2]) / dz
+        t_enter = max(0.0, min(t_top, t_bot))
+        t_exit  = min(1.0, max(t_top, t_bot))
+    else:
+        # Segment is parallel to disk plane
+        if abs(p0[2]) > DISK_HALF_THICKNESS:
+            return None  # entirely outside the slab
+        t_enter, t_exit = 0.0, 1.0
 
-        t = (z_plane - p0[2]) / dz
-        if t < 0.0 or t > 1.0:
-            continue
+    if t_enter >= t_exit:
+        return None  # segment doesn't cross the slab
 
-        hit = p0 + t * (p1 - p0)
-        rho = np.hypot(hit[0], hit[1])
-        if R_DISK_IN <= rho <= R_DISK_OUT:
-            hits.append((t, hit, z_plane))
-
-    if not hits:
+    # Use the entry point as the hit
+    hit = p0 + t_enter * (p1 - p0)
+    rho = np.hypot(hit[0], hit[1])
+    if not (R_DISK_IN <= rho <= R_DISK_OUT):
         return None
 
-    _, hit, z_plane = min(hits, key=lambda item: item[0])
-    surface = "top" if z_plane > 0.0 else "bottom"
+    surface = "top" if p0[2] > 0.0 else "bottom"
     return hit, surface
 
 
@@ -241,7 +243,7 @@ def disk_color(hit_point, outgoing_dir, surface):
 
     gamma = 1.0 / np.sqrt(max(1.0 - beta ** 2, 1e-6))
     doppler = 1.0 / (gamma * max(1.0 - beta * view_cos, 1e-6))
-    grav_shift = np.sqrt(max(1.0 - 2.0 / max(r, R_HORIZON + 1e-6), 1e-6))
+    grav_shift = np.sqrt(max(1.0 - 2.0 / max(rho, R_HORIZON + 1e-6), 1e-6))
 
     intensity_boost = doppler ** 3
     net_shift = doppler * grav_shift
