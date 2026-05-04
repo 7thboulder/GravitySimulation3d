@@ -1,3 +1,13 @@
+For most of the interactive simulations, the controls are W, A, S, and D to go forward, left, back, and right respectively, the arrow keys are to change the angle of the camera. Space bar will stop time but this is only relavant in the newtonian simulations of bodies like the solar system or the two body system I have set up. ] will increase the speed of the camera and [ will slow down the speed of the camera, speed is listed in the bottom corner. Also if you want to change the time step in the newtonian simulations then change the dt value in the code, too much higher than 75000 can break the code but if you want to represent some slow moving bodies than it shouldn't be too much of a problem.
+
+WARNING: IF YOU USE THE VISUAL SIMULATION, IT TAKES A LOT OF CPU POWER AND BE CAREFUL WITH NOT USING TO MANY CPU THREADS TO RENDER IT - the CPU threads can be changed at the top of the PlanarBlackHoleVisual.py code.
+
+For people who just want to see what each file does and run them:
+- main.py is a simulation of the solar system, if you read that code its pretty easy to understand how to add more object into the solar system or create whole new systems. Currently the solar system is slightly inaccurate as I have every planet orbiting using data relative to the sun instead of the sun's barycenter so you would be unable to see how the sun and jupiter orbit eachother, this will be fixed soon.
+- binaryStarSystem.py is a simulation of a planar stable binary star system, I haven't played around with it much but go ahead and see what cool stuff can be done with it.
+- SchwarzschildBlackHoleMain.py is a visual for how spacetime curves around a black hole with light rays to show why light curves around a black hole.
+- PlanarBlackHoleVisual is a visual simulation of a black hole, this is what I'm currently working on. Feel free to play with some of the values at the top, but do be warned that the visuals take a while to render and be careful with how many CPU threads your using to do the simulation because without a decent CPU, the current 12 threads I have it set up at will probably crash whatever your using to run it.
+
 As of 4/11/2026:
 
 This is a basic newtonian physics simulation for how massive objects interact via gravity. Currently I have the solar system modeled in the main.py file and a binary star system modeled in the binaryStarSystem.py file.
