@@ -7,6 +7,8 @@ from pathlib import Path
 from PIL import Image
 
 
+QUALITY_MODE = "preview"  # "preview" or "final"
+
 WIDTH = 800
 HEIGHT = 640
 FOV_DEG = 45.0
@@ -34,6 +36,19 @@ WORKER_FORWARD = None
 WORKER_RIGHT = None
 WORKER_UP = None
 BACKGROUND_IMAGE = None
+
+if QUALITY_MODE == "preview":
+    WIDTH = 360
+    HEIGHT = 288
+    SAMPLES_PER_AXIS = 1
+    N_SAMPLES = 1200
+    MAX_PROCESSES = 4
+elif QUALITY_MODE == "final":
+    WIDTH = 800
+    HEIGHT = 640
+    SAMPLES_PER_AXIS = 3
+    N_SAMPLES = 3000
+    MAX_PROCESSES = 12
 
 
 def make_camera_basis(pos, target):
@@ -496,9 +511,13 @@ def render():
     image = np.zeros((HEIGHT, WIDTH, 3), dtype=float)
     forward, right, up = make_camera_basis(CAMERA_POS, CAMERA_TARGET)
     load_background_image()
+    print(
+        f"quality mode: {QUALITY_MODE} | {WIDTH}x{HEIGHT} | spp={SAMPLES_PER_AXIS ** 2} | orbit samples={N_SAMPLES}",
+        flush=True,
+    )
 
     if USE_MULTIPROCESSING:
-        print(f"multiprocessing enabled with {MAX_PROCESSES} workers")
+        print(f"multiprocessing enabled with {MAX_PROCESSES} workers", flush=True)
         with Pool(
             processes=MAX_PROCESSES,
             initializer=init_worker,
@@ -509,11 +528,11 @@ def render():
                 start=1,
             ):
                 image[j] = row
-                print(f"row {completed_rows}/{HEIGHT} complete")
+                print(f"row {completed_rows}/{HEIGHT} complete", flush=True)
     else:
         init_worker(forward, right, up)
         for j in range(HEIGHT):
-            print(f"row {j + 1}/{HEIGHT}")
+            print(f"row {j + 1}/{HEIGHT}", flush=True)
             _, row = render_row(j)
             image[j] = row
 
