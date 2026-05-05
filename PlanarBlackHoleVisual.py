@@ -10,7 +10,7 @@ from PIL import Image
 WIDTH = 800
 HEIGHT = 640
 FOV_DEG = 45.0
-SAMPLES_PER_AXIS = 2
+SAMPLES_PER_AXIS = 3
 USE_MULTIPROCESSING = True
 MAX_PROCESSES = 12
 BLOOM_THRESHOLD = 0.62
@@ -194,14 +194,18 @@ def segment_disk_intersection(p0, p1):
     if t_enter >= t_exit:
         return None  # segment doesn't cross the slab
 
-    # Use the entry point as the hit
-    hit = p0 + t_enter * (p1 - p0)
+    # Use the midpoint through the slab so the disk behaves less like a hard shell.
+    t_mid = 0.5 * (t_enter + t_exit)
+    hit = p0 + t_mid * (p1 - p0)
     rho = np.hypot(hit[0], hit[1])
     if not (R_DISK_IN <= rho <= R_DISK_OUT):
         return None
 
-    surface = "top" if p0[2] > 0.0 else "bottom"
-    return hit, surface
+    path_length = np.linalg.norm((t_exit - t_enter) * (p1 - p0))
+    z_blend = np.clip(1.0 - abs(hit[2]) / max(DISK_HALF_THICKNESS, 1e-12), 0.0, 1.0)
+    surface = "top" if hit[2] >= 0.0 else "bottom"
+    thickness_mix = np.clip(path_length / (2.0 * DISK_HALF_THICKNESS + 1e-12), 0.0, 1.0)
+    return hit, surface, thickness_mix, z_blend
 
 
 def disk_tangent_velocity(hit_point):
@@ -224,21 +228,21 @@ def disk_texture(hit_point):
 
     log_r = np.log(max(rho, 1e-6))
 
-    spiral_1 = np.sin(9.0 * phi - 13.0 * log_r)
-    spiral_2 = np.sin(17.0 * phi - 21.0 * log_r + 1.2)
-    spiral_3 = np.sin(31.0 * phi - 8.0 * rho + 0.7)
+    spiral_1 = np.sin(5.0 * phi - 8.0 * log_r)
+    spiral_2 = np.sin(9.0 * phi - 12.0 * log_r + 0.9)
+    spiral_3 = np.sin(15.0 * phi - 5.0 * rho + 0.6)
 
-    clump_1 = np.sin(57.0 * phi + 17.0 * rho)
-    clump_2 = np.sin(91.0 * phi - 29.0 * rho + 0.4)
+    clump_1 = np.sin(23.0 * phi + 8.0 * rho)
+    clump_2 = np.sin(37.0 * phi - 11.0 * rho + 0.4)
 
-    large_scale = 1.0 + 0.18 * spiral_1 + 0.12 * spiral_2 + 0.08 * spiral_3
-    fine_scale = 1.0 + 0.06 * clump_1 + 0.04 * clump_2
+    large_scale = 1.0 + 0.10 * spiral_1 + 0.07 * spiral_2 + 0.04 * spiral_3
+    fine_scale = 1.0 + 0.025 * clump_1 + 0.018 * clump_2
 
-    inner_rim_boost = 1.0 + 0.22 * np.exp(-((rho - R_DISK_IN) / 1.2) ** 2) * (0.5 + 0.5 * np.sin(22.0 * phi))
-    return np.clip(large_scale * fine_scale * inner_rim_boost, 0.65, 1.55)
+    inner_rim_boost = 1.0 + 0.12 * np.exp(-((rho - R_DISK_IN) / 1.5) ** 2) * (0.5 + 0.5 * np.sin(12.0 * phi))
+    return np.clip(large_scale * fine_scale * inner_rim_boost, 0.78, 1.28)
 
 
-def disk_color(hit_point, outgoing_dir, surface):
+def disk_color(hit_point, outgoing_dir, surface, thickness_mix, z_blend):
     rho = np.hypot(hit_point[0], hit_point[1])
     t = np.clip((rho - R_DISK_IN) / (R_DISK_OUT - R_DISK_IN), 0.0, 1.0)
 
@@ -277,9 +281,17 @@ def disk_color(hit_point, outgoing_dir, surface):
         color = (1.0 - shift_strength) * color + shift_strength * np.array([0.75, 0.16, 0.03], dtype=float)
 
     # Slightly favor the upper surface and dim the underside.
-    surface_factor = 1.06 if surface == "top" else 0.82
+    surface_factor = 1.04 if surface == "top" else 0.88
     texture_factor = disk_texture(hit_point)
-    return np.clip(color * (brightness + glow) * intensity_boost * surface_factor * texture_factor, 0.0, 6.0)
+    thickness_factor = 0.92 + 0.12 * thickness_mix
+
+    # Feather the top/bottom slab boundary so the disk edge is less hard.
+    edge_softening = 0.72 + 0.28 * (z_blend ** 0.6)
+    return np.clip(
+        color * (brightness + glow) * intensity_boost * surface_factor * texture_factor * thickness_factor * edge_softening,
+        0.0,
+        6.0,
+    )
 
 
 def background_color(direction):
@@ -401,11 +413,11 @@ def trace_ray(ray_origin, ray_dir):
     for i in range(len(positions) - 1):
         disk_hit = segment_disk_intersection(positions[i], positions[i + 1])
         if disk_hit is not None:
-            hit, surface = disk_hit
+            hit, surface, thickness_mix, z_blend = disk_hit
             segment_dir = positions[i + 1] - positions[i]
             norm = np.linalg.norm(segment_dir)
             outgoing_dir = ray_dir if norm < 1e-12 else segment_dir / norm
-            return disk_color(hit, outgoing_dir, surface)
+            return disk_color(hit, outgoing_dir, surface, thickness_mix, z_blend)
 
     if fate == "captured":
         return np.zeros(3, dtype=float)
