@@ -217,6 +217,27 @@ def disk_tangent_velocity(hit_point):
     return beta * tangent
 
 
+def disk_texture(hit_point):
+    x, y, _ = hit_point
+    rho = np.hypot(x, y)
+    phi = np.arctan2(y, x)
+
+    log_r = np.log(max(rho, 1e-6))
+
+    spiral_1 = np.sin(9.0 * phi - 13.0 * log_r)
+    spiral_2 = np.sin(17.0 * phi - 21.0 * log_r + 1.2)
+    spiral_3 = np.sin(31.0 * phi - 8.0 * rho + 0.7)
+
+    clump_1 = np.sin(57.0 * phi + 17.0 * rho)
+    clump_2 = np.sin(91.0 * phi - 29.0 * rho + 0.4)
+
+    large_scale = 1.0 + 0.18 * spiral_1 + 0.12 * spiral_2 + 0.08 * spiral_3
+    fine_scale = 1.0 + 0.06 * clump_1 + 0.04 * clump_2
+
+    inner_rim_boost = 1.0 + 0.22 * np.exp(-((rho - R_DISK_IN) / 1.2) ** 2) * (0.5 + 0.5 * np.sin(22.0 * phi))
+    return np.clip(large_scale * fine_scale * inner_rim_boost, 0.65, 1.55)
+
+
 def disk_color(hit_point, outgoing_dir, surface):
     rho = np.hypot(hit_point[0], hit_point[1])
     t = np.clip((rho - R_DISK_IN) / (R_DISK_OUT - R_DISK_IN), 0.0, 1.0)
@@ -257,7 +278,8 @@ def disk_color(hit_point, outgoing_dir, surface):
 
     # Slightly favor the upper surface and dim the underside.
     surface_factor = 1.06 if surface == "top" else 0.82
-    return np.clip(color * (brightness + glow) * intensity_boost * surface_factor, 0.0, 6.0)
+    texture_factor = disk_texture(hit_point)
+    return np.clip(color * (brightness + glow) * intensity_boost * surface_factor * texture_factor, 0.0, 6.0)
 
 
 def background_color(direction):
