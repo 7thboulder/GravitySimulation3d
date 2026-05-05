@@ -24,7 +24,7 @@ CAMERA_TARGET = np.array([0.0, 0.0, 3], dtype=float)
 R_HORIZON = 2.0
 R_DISK_IN = 6.0
 R_DISK_OUT = 16.0
-DISK_HALF_THICKNESS = 0.35
+DISK_HALF_THICKNESS = 0.42
 R_ESCAPE = 180.0
 BACKGROUND_IMAGE_PATH = Path("space_background.png")
 
@@ -177,35 +177,53 @@ def trace_planar_geodesic(ray_origin, ray_dir):
 
 
 def segment_disk_intersection(p0, p1):
+    def disk_half_thickness_at_radius(rho):
+        t = np.clip((rho - R_DISK_IN) / (R_DISK_OUT - R_DISK_IN), 0.0, 1.0)
+        # Slightly puffed inner disk, gently tapering outward.
+        return DISK_HALF_THICKNESS * (1.12 - 0.52 * t + 0.08 * np.sin(np.pi * t))
+
     dz = p1[2] - p0[2]
+    hit_candidates = []
 
-    # Find the t-interval where the segment is inside the z-slab
-    if abs(dz) > 1e-12:
-        t_top = (DISK_HALF_THICKNESS - p0[2]) / dz
-        t_bot = (-DISK_HALF_THICKNESS - p0[2]) / dz
-        t_enter = max(0.0, min(t_top, t_bot))
-        t_exit  = min(1.0, max(t_top, t_bot))
-    else:
-        # Segment is parallel to disk plane
-        if abs(p0[2]) > DISK_HALF_THICKNESS:
-            return None  # entirely outside the slab
-        t_enter, t_exit = 0.0, 1.0
+    # Sample along the segment and find where we enter the tapered disk volume.
+    sample_count = 10
+    previous_inside = False
+    previous_t = 0.0
+    previous_point = p0
 
-    if t_enter >= t_exit:
-        return None  # segment doesn't cross the slab
+    for idx in range(sample_count + 1):
+        t = idx / sample_count
+        point = p0 + t * (p1 - p0)
+        rho = np.hypot(point[0], point[1])
+        if R_DISK_IN <= rho <= R_DISK_OUT:
+            local_half_thickness = disk_half_thickness_at_radius(rho)
+            inside = abs(point[2]) <= local_half_thickness
+        else:
+            inside = False
 
-    # Use the midpoint through the slab so the disk behaves less like a hard shell.
-    t_mid = 0.5 * (t_enter + t_exit)
+        if inside and not previous_inside:
+            hit_candidates.append((previous_t, t, previous_point, point))
+        previous_inside = inside
+        previous_t = t
+        previous_point = point
+
+    if not hit_candidates:
+        return None
+
+    t0, t1, q0, q1 = hit_candidates[0]
+    t_mid = 0.5 * (t0 + t1)
     hit = p0 + t_mid * (p1 - p0)
     rho = np.hypot(hit[0], hit[1])
     if not (R_DISK_IN <= rho <= R_DISK_OUT):
         return None
 
-    path_length = np.linalg.norm((t_exit - t_enter) * (p1 - p0))
-    z_blend = np.clip(1.0 - abs(hit[2]) / max(DISK_HALF_THICKNESS, 1e-12), 0.0, 1.0)
+    local_half_thickness = disk_half_thickness_at_radius(rho)
+    path_length = np.linalg.norm((t1 - t0) * (p1 - p0))
+    z_blend = np.clip(1.0 - abs(hit[2]) / max(local_half_thickness, 1e-12), 0.0, 1.0)
     surface = "top" if hit[2] >= 0.0 else "bottom"
-    thickness_mix = np.clip(path_length / (2.0 * DISK_HALF_THICKNESS + 1e-12), 0.0, 1.0)
-    return hit, surface, thickness_mix, z_blend
+    thickness_mix = np.clip(path_length / (2.0 * local_half_thickness + 1e-12), 0.0, 1.0)
+    radial_taper = np.clip(local_half_thickness / max(DISK_HALF_THICKNESS, 1e-12), 0.0, 1.5)
+    return hit, surface, thickness_mix, z_blend, radial_taper
 
 
 def disk_tangent_velocity(hit_point):
@@ -238,11 +256,19 @@ def disk_texture(hit_point):
     large_scale = 1.0 + 0.10 * spiral_1 + 0.07 * spiral_2 + 0.04 * spiral_3
     fine_scale = 1.0 + 0.025 * clump_1 + 0.018 * clump_2
 
-    inner_rim_boost = 1.0 + 0.12 * np.exp(-((rho - R_DISK_IN) / 1.5) ** 2) * (0.5 + 0.5 * np.sin(12.0 * phi))
-    return np.clip(large_scale * fine_scale * inner_rim_boost, 0.78, 1.28)
+    hotspot_1 = np.exp(-((phi - 0.7 - 0.55 * np.log(max(rho / R_DISK_IN, 1e-6))) / 0.22) ** 2)
+    hotspot_2 = np.exp(-((phi + 1.9 - 0.35 * np.log(max(rho / R_DISK_IN, 1e-6))) / 0.18) ** 2)
+    shear_1 = 0.5 + 0.5 * np.sin(26.0 * phi - 19.0 * np.log(max(rho, 1e-6)))
+    shear_2 = 0.5 + 0.5 * np.sin(41.0 * phi - 11.0 * rho + 0.8)
+
+    inner_rim_boost = 1.0 + 0.22 * np.exp(-((rho - R_DISK_IN) / 1.1) ** 2) * (0.5 + 0.5 * np.sin(12.0 * phi))
+    hotspot_boost = 1.0 + 0.16 * hotspot_1 + 0.12 * hotspot_2
+    shear_boost = 1.0 + 0.08 * shear_1 + 0.05 * shear_2
+
+    return np.clip(large_scale * fine_scale * inner_rim_boost * hotspot_boost * shear_boost, 0.76, 1.42)
 
 
-def disk_color(hit_point, outgoing_dir, surface, thickness_mix, z_blend):
+def disk_color(hit_point, outgoing_dir, surface, thickness_mix, z_blend, radial_taper):
     rho = np.hypot(hit_point[0], hit_point[1])
     t = np.clip((rho - R_DISK_IN) / (R_DISK_OUT - R_DISK_IN), 0.0, 1.0)
 
@@ -258,6 +284,7 @@ def disk_color(hit_point, outgoing_dir, surface, thickness_mix, z_blend):
 
     brightness = 4.0 / (rho ** 0.92)
     glow = 0.18 / max(rho - R_HORIZON, 0.35)
+    inner_sharpen = 1.0 + 0.45 * np.exp(-((rho - R_DISK_IN) / 0.75) ** 2)
 
     velocity = disk_tangent_velocity(hit_point)
     beta = np.linalg.norm(velocity)
@@ -283,12 +310,24 @@ def disk_color(hit_point, outgoing_dir, surface, thickness_mix, z_blend):
     # Slightly favor the upper surface and dim the underside.
     surface_factor = 1.04 if surface == "top" else 0.88
     texture_factor = disk_texture(hit_point)
-    thickness_factor = 0.92 + 0.12 * thickness_mix
+    thickness_factor = (0.92 + 0.12 * thickness_mix) * (0.94 + 0.12 * radial_taper)
+    view_angle = np.clip(abs(outgoing_dir[2]), 0.0, 1.0)
+    optical_depth = 0.55 + 1.4 * np.exp(-((rho - R_DISK_IN) / 2.8) ** 2) + 0.35 * texture_factor
+    transmission = np.exp(-optical_depth * (0.35 + 1.1 * (1.0 - view_angle)) * (0.8 + 0.4 * thickness_mix))
+    opacity_factor = 0.45 + 0.55 * (1.0 - transmission)
 
     # Feather the top/bottom slab boundary so the disk edge is less hard.
     edge_softening = 0.72 + 0.28 * (z_blend ** 0.6)
     return np.clip(
-        color * (brightness + glow) * intensity_boost * surface_factor * texture_factor * thickness_factor * edge_softening,
+        color
+        * (brightness + glow)
+        * inner_sharpen
+        * intensity_boost
+        * surface_factor
+        * texture_factor
+        * thickness_factor
+        * edge_softening
+        * opacity_factor,
         0.0,
         6.0,
     )
@@ -413,11 +452,11 @@ def trace_ray(ray_origin, ray_dir):
     for i in range(len(positions) - 1):
         disk_hit = segment_disk_intersection(positions[i], positions[i + 1])
         if disk_hit is not None:
-            hit, surface, thickness_mix, z_blend = disk_hit
+            hit, surface, thickness_mix, z_blend, radial_taper = disk_hit
             segment_dir = positions[i + 1] - positions[i]
             norm = np.linalg.norm(segment_dir)
             outgoing_dir = ray_dir if norm < 1e-12 else segment_dir / norm
-            return disk_color(hit, outgoing_dir, surface, thickness_mix, z_blend)
+            return disk_color(hit, outgoing_dir, surface, thickness_mix, z_blend, radial_taper)
 
     if fate == "captured":
         return np.zeros(3, dtype=float)
