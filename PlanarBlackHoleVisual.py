@@ -29,6 +29,7 @@ R_DISK_OUT = 16.0
 DISK_HALF_THICKNESS = 0.42
 R_ESCAPE = 180.0
 BACKGROUND_IMAGE_PATH = Path("space_background.png")
+DISK_VOLUME_STEPS = 8
 
 PHI_MAX = 24.0 * np.pi
 N_SAMPLES = 3000
@@ -191,11 +192,13 @@ def trace_planar_geodesic(ray_origin, ray_dir):
     return positions, fate
 
 
+def disk_half_thickness_at_radius(rho):
+    t = np.clip((rho - R_DISK_IN) / (R_DISK_OUT - R_DISK_IN), 0.0, 1.0)
+    # Slightly puffed inner disk, gently tapering outward.
+    return DISK_HALF_THICKNESS * (1.12 - 0.52 * t + 0.08 * np.sin(np.pi * t))
+
+
 def segment_disk_intersection(p0, p1):
-    def disk_half_thickness_at_radius(rho):
-        t = np.clip((rho - R_DISK_IN) / (R_DISK_OUT - R_DISK_IN), 0.0, 1.0)
-        # Slightly puffed inner disk, gently tapering outward.
-        return DISK_HALF_THICKNESS * (1.12 - 0.52 * t + 0.08 * np.sin(np.pi * t))
 
     dz = p1[2] - p0[2]
     hit_candidates = []
@@ -217,13 +220,18 @@ def segment_disk_intersection(p0, p1):
             inside = False
 
         if inside and not previous_inside:
-            hit_candidates.append((previous_t, t, previous_point, point))
+            hit_candidates.append([previous_t, None, previous_point, point])
+        elif previous_inside and not inside and hit_candidates and hit_candidates[-1][1] is None:
+            hit_candidates[-1][1] = t
         previous_inside = inside
         previous_t = t
         previous_point = point
 
     if not hit_candidates:
         return None
+
+    if hit_candidates[0][1] is None:
+        hit_candidates[0][1] = 1.0
 
     t0, t1, q0, q1 = hit_candidates[0]
     t_mid = 0.5 * (t0 + t1)
@@ -238,7 +246,7 @@ def segment_disk_intersection(p0, p1):
     surface = "top" if hit[2] >= 0.0 else "bottom"
     thickness_mix = np.clip(path_length / (2.0 * local_half_thickness + 1e-12), 0.0, 1.0)
     radial_taper = np.clip(local_half_thickness / max(DISK_HALF_THICKNESS, 1e-12), 0.0, 1.5)
-    return hit, surface, thickness_mix, z_blend, radial_taper
+    return hit, surface, thickness_mix, z_blend, radial_taper, t0, t1
 
 
 def disk_tangent_velocity(hit_point):
@@ -346,6 +354,47 @@ def disk_color(hit_point, outgoing_dir, surface, thickness_mix, z_blend, radial_
         0.0,
         6.0,
     )
+
+
+def accumulate_disk_volume(p0, p1, ray_dir, t0, t1):
+    segment = p1 - p0
+    segment_len = np.linalg.norm(segment)
+    if segment_len < 1e-12:
+        return None
+
+    accum = np.zeros(3, dtype=float)
+    transmittance = 1.0
+
+    for step in range(DISK_VOLUME_STEPS):
+        s = (step + 0.5) / DISK_VOLUME_STEPS
+        t = (1.0 - s) * t0 + s * t1
+        point = p0 + t * segment
+
+        rho = np.hypot(point[0], point[1])
+        if not (R_DISK_IN <= rho <= R_DISK_OUT):
+            continue
+
+        local_half_thickness = disk_half_thickness_at_radius(rho)
+        z_blend = np.clip(1.0 - abs(point[2]) / max(local_half_thickness, 1e-12), 0.0, 1.0)
+        if z_blend <= 0.0:
+            continue
+
+        surface = "top" if point[2] >= 0.0 else "bottom"
+        radial_taper = np.clip(local_half_thickness / max(DISK_HALF_THICKNESS, 1e-12), 0.0, 1.5)
+        thickness_mix = np.clip((t1 - t0) * segment_len / (2.0 * local_half_thickness + 1e-12), 0.0, 1.0)
+
+        base_color = disk_color(point, ray_dir, surface, thickness_mix, z_blend, radial_taper)
+        density = (0.22 + 0.95 * z_blend ** 1.6) * (1.15 - 0.35 * np.clip((rho - R_DISK_IN) / (R_DISK_OUT - R_DISK_IN), 0.0, 1.0))
+        optical_depth = density * segment_len * (t1 - t0) / DISK_VOLUME_STEPS * 1.15
+        absorption = 1.0 - np.exp(-optical_depth)
+
+        accum += transmittance * base_color * absorption
+        transmittance *= np.exp(-optical_depth * 1.25)
+
+        if transmittance < 0.02:
+            break
+
+    return np.clip(accum, 0.0, 6.0)
 
 
 def background_color(direction):
@@ -467,10 +516,13 @@ def trace_ray(ray_origin, ray_dir):
     for i in range(len(positions) - 1):
         disk_hit = segment_disk_intersection(positions[i], positions[i + 1])
         if disk_hit is not None:
-            hit, surface, thickness_mix, z_blend, radial_taper = disk_hit
+            hit, surface, thickness_mix, z_blend, radial_taper, t0, t1 = disk_hit
             segment_dir = positions[i + 1] - positions[i]
             norm = np.linalg.norm(segment_dir)
             outgoing_dir = ray_dir if norm < 1e-12 else segment_dir / norm
+            volume_color = accumulate_disk_volume(positions[i], positions[i + 1], outgoing_dir, t0, t1)
+            if volume_color is not None:
+                return volume_color
             return disk_color(hit, outgoing_dir, surface, thickness_mix, z_blend, radial_taper)
 
     if fate == "captured":
