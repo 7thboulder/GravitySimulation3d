@@ -9,20 +9,19 @@ from PIL import Image
 WIDTH = 1280
 HEIGHT = 720
 FOV_DEG = 45.0
-SAMPLES_PER_AXIS = 3
+SAMPLES_PER_AXIS = 4
 GEODESIC_STEPS = 3000
 PHI_MAX = 24.0 * np.pi
 EXPOSURE = 1.0
 
-CAMERA_POS = np.array([0.0, -32.0, 3.0], dtype="f4")
-CAMERA_TARGET = np.array([0.0, 0.0, 3.0], dtype="f4")
+CAMERA_POS = np.array([0.0, -32.0, 5.0], dtype="f4")
+CAMERA_TARGET = np.array([0.0, 0.0, 0.0], dtype="f4")
 CAMERA_WORLD_UP = np.array([0.0, 0.0, 1.0], dtype="f4")
 
 R_HORIZON = 2.0
 R_DISK_IN = 6.0
-R_DISK_OUT = 16.0
+R_DISK_OUT = 17.5
 DISK_HALF_THICKNESS = 0.24
-# DISK_HALF_THICKNESS = 0.24
 R_ESCAPE = 180.0
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -303,19 +302,32 @@ float diskTexture(vec3 hitPoint) {
     float rho = length(hitPoint.xy);
     float phi = atan(hitPoint.y, hitPoint.x);
     float logR = log(max(rho, 1e-6));
+    vec2 angular = vec2(cos(phi), sin(phi));
 
-    vec2 diskCoord = vec2(0.72 * logR - 0.045 * phi, 0.18 * phi + 0.012 * rho);
+    vec2 diskCoord = vec2(
+        1.05 * logR + 0.42 * angular.x + 0.035 * rho,
+        0.34 * rho + 0.42 * angular.y
+    );
     float broad = fbm(diskCoord);
-    float spiral = 0.5 + 0.5 * sin(2.2 * phi - 4.8 * logR + 0.55 * broad);
+    float broad2 = fbm(diskCoord * 1.55 + vec2(2.4, -1.1));
+    float spiral = 0.5 + 0.5 * sin(2.0 * phi - 5.7 * logR + 1.35 * broad);
+    float shear = 0.5 + 0.5 * sin(5.0 * phi - 8.4 * logR + 0.95 * broad2);
+    float radialBand = 0.5 + 0.5 * sin(1.05 * rho + 2.0 * phi + 2.2 * broad2);
+    float wisp = smoothstep(0.42, 1.05, spiral + 0.55 * broad2);
 
     float innerRim = exp(-pow((rho - diskInner) / 1.85, 2.0));
-    float turbulence = 0.92 + 0.08 * (broad - 0.5) + 0.10 * spiral + 0.08 * innerRim;
-    return clamp(turbulence, 0.78, 1.18);
+    float turbulence = 0.54
+        + 0.22 * broad
+        + 0.34 * wisp
+        + 0.12 * shear
+        + 0.10 * radialBand
+        + 0.11 * innerRim;
+    return clamp(turbulence, 0.38, 1.70);
 }
 
 float diskRadialFeather(float rho) {
-    float inner = smoothstep(diskInner, diskInner + 1.8, rho);
-    float outer = 1.0 - smoothstep(diskInner + 3.4, diskOuter, rho);
+    float inner = smoothstep(diskInner, diskInner + 1.4, rho);
+    float outer = 1.0 - smoothstep(diskOuter - 3.2, diskOuter, rho);
     return inner * outer;
 }
 
@@ -329,7 +341,7 @@ float gasDensity(vec3 point) {
     float z = abs(point.z) / max(localHalfThickness, 1e-6);
     float verticalCore = exp(-3.1 * z * z);
     float warmAtmosphere = 0.18 * exp(-0.75 * z * z);
-    float radialFalloff = pow(diskInner / max(rho, diskInner), 2.35);
+    float radialFalloff = pow(diskInner / max(rho, diskInner), 1.65);
     float innerPileup = 1.0 + 0.85 * exp(-pow((rho - diskInner) / 1.4, 2.0));
 
     return diskRadialFeather(rho)
@@ -337,16 +349,16 @@ float gasDensity(vec3 point) {
         * innerPileup
         * diskTexture(point)
         * (verticalCore + warmAtmosphere)
-        * 1.18;
+        * 1.65;
 }
 
 vec3 diskColor(vec3 hitPoint, vec3 outgoingDir, float surfaceSign, float thicknessMix, float zBlend, float radialTaper) {
     float rho = length(hitPoint.xy);
     float t = clamp((rho - diskInner) / (diskOuter - diskInner), 0.0, 1.0);
 
-    vec3 inner = vec3(1.0, 0.985, 0.93);
-    vec3 mid = vec3(1.0, 0.58, 0.18);
-    vec3 outer = vec3(0.72, 0.13, 0.02);
+    vec3 inner = vec3(1.0, 1.0, 0.965);
+    vec3 mid = vec3(1.0, 0.80, 0.34);
+    vec3 outer = vec3(1.0, 0.44, 0.12);
 
     vec3 color;
     if (t < 0.45) {
@@ -355,8 +367,8 @@ vec3 diskColor(vec3 hitPoint, vec3 outgoingDir, float surfaceSign, float thickne
         color = mix(mid, outer, (t - 0.45) / 0.55);
     }
 
-    float brightness = 4.8 / pow(rho, 0.86);
-    float glow = 0.18 / max(rho - horizonRadius, 0.35);
+    float brightness = 6.2 / pow(rho, 0.84);
+    float glow = 0.32 / max(rho - horizonRadius, 0.35);
     float innerSharpen = 1.0 + 0.62 * exp(-pow((rho - diskInner) / 0.9, 2.0));
 
     vec3 velocity = diskTangentVelocity(hitPoint);
@@ -378,11 +390,12 @@ vec3 diskColor(vec3 hitPoint, vec3 outgoingDir, float surfaceSign, float thickne
         color = mix(color, vec3(1.0, 0.97, 0.9), shiftStrength);
     } else {
         float shiftStrength = min(1.0 - netShift, 0.7);
-        color = mix(color, vec3(0.75, 0.16, 0.03), shiftStrength);
+        color = mix(color, vec3(1.0, 0.46, 0.12), shiftStrength);
     }
 
     float surfaceFactor = surfaceSign >= 0.0 ? 1.04 : 0.88;
-    float textureFactor = diskTexture(hitPoint);
+    float rawTexture = diskTexture(hitPoint);
+    float textureFactor = 0.92 + 0.18 * smoothstep(0.78, 1.45, rawTexture);
     float thicknessFactor = (0.92 + 0.12 * thicknessMix) * (0.94 + 0.12 * radialTaper);
     float viewAngle = clamp(abs(outgoingDir.z), 0.0, 1.0);
     float opticalDepth = 0.55 + 1.4 * exp(-pow((rho - diskInner) / 2.8, 2.0)) + 0.35 * textureFactor;
@@ -463,12 +476,21 @@ vec4 shadeGasDisk(DiskHit hit, vec3 outgoingDir) {
     float density = gasDensity(hit.point);
     float turbulence = diskTexture(hit.point);
     float radialFeather = diskRadialFeather(rho);
+    float phi = atan(hit.point.y, hit.point.x);
 
     float innerHeat = exp(-pow((rho - diskInner) / 1.7, 2.0));
+    vec3 thermalColor = mix(
+        vec3(1.0, 0.48, 0.12),
+        vec3(1.0, 0.97, 0.72),
+        clamp(0.25 + 0.75 * innerHeat, 0.0, 1.0)
+    );
     float surfaceDensity = smoothstep(0.05, 1.15, density) * radialFeather;
-    float alpha = surfaceDensity * (0.20 + 0.20 * innerHeat);
-    alpha *= 0.92 + 0.08 * turbulence;
-    alpha = clamp(alpha, 0.0, 0.34);
+    float wispMask = smoothstep(0.62, 1.36, turbulence);
+    float alpha = surfaceDensity * (0.14 + 0.18 * innerHeat);
+    alpha *= 0.55 + 0.55 * wispMask;
+    float edgeHaze = radialFeather * (1.0 - smoothstep(diskOuter - 2.5, diskOuter, rho));
+    alpha = max(alpha, 0.008 * edgeHaze * (0.35 + 0.65 * wispMask));
+    alpha = clamp(alpha, 0.0, 0.28);
 
     vec3 emission = diskColor(
         hit.point,
@@ -479,12 +501,26 @@ vec4 shadeGasDisk(DiskHit hit, vec3 outgoingDir) {
         hit.radialTaper
     );
 
-    float hotFilament = smoothstep(0.98, 1.16, turbulence);
+    float hotFilament = smoothstep(0.90, 1.34, turbulence);
     float thermalGlow = 0.85 + 0.52 * density + 0.28 * hotFilament + 0.58 * innerHeat;
     emission *= thermalGlow;
 
-    float filament = 0.78 + 0.22 * sin(2.4 * atan(hit.point.y, hit.point.x) - 5.1 * log(max(rho, 1e-6)) + 0.7 * turbulence);
-    vec3 gasGlow = emission * alpha * (0.08 + 4.2 * alpha) * filament * 2.0;
+    float filamentPhase = 0.5 + 0.5 * sin(2.0 * phi - 5.1 * log(max(rho, 1e-6)) + 0.7 * turbulence);
+    float filament = 0.72 + 0.42 * smoothstep(0.35, 1.0, filamentPhase + 0.35 * wispMask);
+    vec3 gasGlow = emission * alpha * (0.55 + 3.8 * alpha + 1.05 * hotFilament) * filament * (1.25 + 0.95 * wispMask);
+    gasGlow += emission * edgeHaze * (0.010 + 0.050 * hotFilament) * (0.25 + 0.75 * wispMask);
+    gasGlow += edgeHaze
+        * vec3(1.0, 0.55, 0.16)
+        * (0.08 + 0.82 * hotFilament)
+        * (0.45 + 0.55 * filament);
+    gasGlow += radialFeather
+        * thermalColor
+        * (0.080 + 0.23 * wispMask)
+        * (0.25 + 0.75 * surfaceDensity);
+    gasGlow += thermalColor
+        * radialFeather
+        * (0.040 + 0.12 * hotFilament)
+        * (0.35 + 0.65 * innerHeat);
     return vec4(clamp(gasGlow, 0.0, 6.0), alpha);
 }
 
@@ -601,7 +637,7 @@ vec3 traceRay(vec3 rayOrigin, vec3 rayDir) {
         DiskHit hit;
         if (segmentDiskIntersection(prevPos, pos, hit)) {
             vec4 diskVolume = shadeGasDisk(hit, outgoingDir);
-            if (diskVolume.a < 0.025) {
+            if (diskVolume.a < 0.001) {
                 prevPos = pos;
                 prevTravelDir = outgoingDir;
                 u = nextState.x;
@@ -610,12 +646,11 @@ vec3 traceRay(vec3 rayOrigin, vec3 rayDir) {
                 continue;
             }
 
-            vec3 sharpBackground = backgroundColor(outgoingDir);
             vec3 smoothBackground = smoothBackgroundColor(outgoingDir);
-            float gasMask = smoothstep(0.04, 0.20, diskVolume.a);
-            vec3 backgroundBehindGas = mix(sharpBackground, smoothBackground, gasMask);
+            float gasMask = smoothstep(0.015, 0.20, diskVolume.a);
+            vec3 backgroundBehindGas = smoothBackground;
             float transmission = pow(1.0 - diskVolume.a, 1.15);
-            return clamp(diskVolume.rgb + backgroundBehindGas * transmission * (0.35 + 0.45 * (1.0 - gasMask)), 0.0, 6.0);
+            return clamp(diskVolume.rgb + backgroundBehindGas * transmission * (0.58 - 0.22 * gasMask), 0.0, 6.0);
         }
 
         if (nextU >= 1.0 / horizonRadius || r <= horizonRadius) {
